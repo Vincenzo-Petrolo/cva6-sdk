@@ -1,32 +1,34 @@
-From 484256265b5afe5e9d91b61cf79fdec69d20c17e Mon Sep 17 00:00:00 2001
+From a951d46db0b5d30264de78dcf7f63586b3a7a84f Mon Sep 17 00:00:00 2001
 From: Vincenzo Petrolo <vincenzo.petrolo@polito.it>
-Date: Thu, 9 Oct 2025 21:00:50 +0200
+Date: Fri, 10 Oct 2025 00:51:35 +0200
 Subject: [PATCH] iio: adc: add AD9361 RF transceiver driver (from ADI
  adi-5.10.0)
 
 Signed-off-by: Vincenzo Petrolo <vincenzo.petrolo@polito.it>
 ---
- drivers/iio/adc/Kconfig                |   11 +
- drivers/iio/adc/Makefile               |    1 +
- drivers/iio/adc/ad9361.c               | 9635 ++++++++++++++++++++++++
- drivers/iio/adc/ad9361.h               |  219 +
- drivers/iio/adc/ad9361_conv.c          |  808 ++
- drivers/iio/adc/ad9361_ext_band_ctrl.c |  718 ++
- drivers/iio/adc/ad9361_private.h       |  501 ++
- drivers/iio/adc/ad9361_regs.h          | 2831 +++++++
- 8 files changed, 14724 insertions(+)
+ drivers/iio/adc/Kconfig                  |   23 +
+ drivers/iio/adc/Makefile                 |    1 +
+ drivers/iio/adc/ad9361.c                 | 9635 ++++++++++++++++++++++
+ drivers/iio/adc/ad9361.h                 |  219 +
+ drivers/iio/adc/ad9361_conv.c            |  808 ++
+ drivers/iio/adc/ad9361_ext_band_ctrl.c   |  718 ++
+ drivers/iio/adc/ad9361_private.h         |  501 ++
+ drivers/iio/adc/ad9361_regs.h            | 2831 +++++++
+ include/dt-bindings/iio/adc/adi,ad9361.h |   21 +
+ 9 files changed, 14757 insertions(+)
  create mode 100644 drivers/iio/adc/ad9361.c
  create mode 100644 drivers/iio/adc/ad9361.h
  create mode 100644 drivers/iio/adc/ad9361_conv.c
  create mode 100644 drivers/iio/adc/ad9361_ext_band_ctrl.c
  create mode 100644 drivers/iio/adc/ad9361_private.h
  create mode 100644 drivers/iio/adc/ad9361_regs.h
+ create mode 100644 include/dt-bindings/iio/adc/adi,ad9361.h
 
 diff --git a/drivers/iio/adc/Kconfig b/drivers/iio/adc/Kconfig
-index 17e9ceb9c..e365f5f91 100644
+index 17e9ceb9c..cd3cfd6d8 100644
 --- a/drivers/iio/adc/Kconfig
 +++ b/drivers/iio/adc/Kconfig
-@@ -1224,3 +1224,14 @@ config XILINX_XADC
+@@ -1224,3 +1224,26 @@ config XILINX_XADC
  	  xilinx-xadc.
  
  endmenu
@@ -41,15 +43,27 @@ index 17e9ceb9c..e365f5f91 100644
 +	  Transceivers (AD9361/AD9363/AD9364) over SPI. The driver exposes
 +	  the transceiver via the IIO subsystem and is configured through
 +	  Device Tree. Typical systems pair it with AXI-DMAC for streaming IQ.
++config AD9361_EXT_BAND_CONTROL
++	bool "Support for controlling RX/TX band selection by the driver"
++	depends on AD9361
++	help
++	  Say yes here if you want to enable support in the AD9361 driver
++	  for controlling GPIOs and chip settings to select different bands
++	  based on the RX/TX LO frequency.
++	  The GPIOs would usually control external filter banks (high & low
++	  pass filters for RX filters, and low pass for TX filters).
++
++	  The functionality aims at trying to be a generic approach that would
++	  potentially benefit as many designs as possible.
 diff --git a/drivers/iio/adc/Makefile b/drivers/iio/adc/Makefile
-index 90f94ada7..cd2a57b4b 100644
+index 90f94ada7..5ccb05dd0 100644
 --- a/drivers/iio/adc/Makefile
 +++ b/drivers/iio/adc/Makefile
 @@ -111,3 +111,4 @@ obj-$(CONFIG_VIPERBOARD_ADC) += viperboard_adc.o
  xilinx-xadc-y := xilinx-xadc-core.o xilinx-xadc-events.o
  obj-$(CONFIG_XILINX_XADC) += xilinx-xadc.o
  obj-$(CONFIG_SD_ADC_MODULATOR) += sd_adc_modulator.o
-+obj-$(CONFIG_AD9361)		+= ad9361.o
++obj-$(CONFIG_AD9361)		+= ad9361.o ad9361_conv.o ad9361_ext_band_ctrl.o
 diff --git a/drivers/iio/adc/ad9361.c b/drivers/iio/adc/ad9361.c
 new file mode 100644
 index 000000000..b21e2129e
@@ -14796,6 +14810,33 @@ index 000000000..6c010985e
 +#define MAX_NUM_GAIN_TABLES		16 /* randomly picked */
 +
 +#define MAX_TX_ATTENUATION_DB		89750
++
++#endif
+diff --git a/include/dt-bindings/iio/adc/adi,ad9361.h b/include/dt-bindings/iio/adc/adi,ad9361.h
+new file mode 100644
+index 000000000..add7df195
+--- /dev/null
++++ b/include/dt-bindings/iio/adc/adi,ad9361.h
+@@ -0,0 +1,21 @@
++/*
++ * This header provides constants for AD9361
++ */
++
++#ifndef _DT_BINDINGS_IIO_ADC_AD9361_H
++#define _DT_BINDINGS_IIO_ADC_AD9361_H
++
++#define AD9361_EXT_BAND_CTL_OP_LOW	0
++#define AD9361_EXT_BAND_CTL_OP_HIGH	1
++#define AD9361_EXT_BAND_CTL_OP_INPUT	2
++#define AD9361_EXT_BAND_CTL_OP_NOP	3
++
++/* define AD9361_EXT_BAND_SHORTHANDS if you want these shorthands */
++#ifdef AD9361_EXT_BAND_CTL_SHORTHANDS
++#define _	(AD9361_EXT_BAND_CTL_OP_NOP)
++#define L	(AD9361_EXT_BAND_CTL_OP_LOW)
++#define H	(AD9361_EXT_BAND_CTL_OP_HIGH)
++#define I	(AD9361_EXT_BAND_CTL_OP_INPUT)
++#endif
 +
 +#endif
 -- 
