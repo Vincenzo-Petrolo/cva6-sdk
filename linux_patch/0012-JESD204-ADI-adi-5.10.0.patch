@@ -1,0 +1,4818 @@
+From 2a7dd7293b2b163d2c3b0ed864c5faeb11d97456 Mon Sep 17 00:00:00 2001
+From: Vincenzo Petrolo <vincenzo.petrolo@polito.it>
+Date: Fri, 10 Oct 2025 21:49:15 +0200
+Subject: [PATCH] jesd204 framework (from ADI adi-5.10.0)
+
+Signed-off-by: Vincenzo Petrolo <vincenzo.petrolo@polito.it>
+---
+ drivers/jesd204/Kconfig                     |   34 +
+ drivers/jesd204/Makefile                    |   12 +
+ drivers/jesd204/attr.h                      |   35 +
+ drivers/jesd204/jesd204-core.c              | 1200 ++++++++++++++++
+ drivers/jesd204/jesd204-fsm.c               | 1440 +++++++++++++++++++
+ drivers/jesd204/jesd204-priv.h              |  246 ++++
+ drivers/jesd204/jesd204-sysfs.c             |  714 +++++++++
+ drivers/jesd204/jesd204_top_device.c        |  398 +++++
+ include/dt-bindings/jesd204/adxcvr.h        |   26 +
+ include/dt-bindings/jesd204/device-states.h |   33 +
+ include/linux/jesd204/adi-common.h          |   33 +
+ include/linux/jesd204/jesd204-of.h          |   98 ++
+ include/linux/jesd204/jesd204.h             |  432 ++++++
+ 13 files changed, 4701 insertions(+)
+ create mode 100644 drivers/jesd204/Kconfig
+ create mode 100644 drivers/jesd204/Makefile
+ create mode 100644 drivers/jesd204/attr.h
+ create mode 100644 drivers/jesd204/jesd204-core.c
+ create mode 100644 drivers/jesd204/jesd204-fsm.c
+ create mode 100644 drivers/jesd204/jesd204-priv.h
+ create mode 100644 drivers/jesd204/jesd204-sysfs.c
+ create mode 100644 drivers/jesd204/jesd204_top_device.c
+ create mode 100644 include/dt-bindings/jesd204/adxcvr.h
+ create mode 100644 include/dt-bindings/jesd204/device-states.h
+ create mode 100644 include/linux/jesd204/adi-common.h
+ create mode 100644 include/linux/jesd204/jesd204-of.h
+ create mode 100644 include/linux/jesd204/jesd204.h
+
+diff --git a/drivers/jesd204/Kconfig b/drivers/jesd204/Kconfig
+new file mode 100644
+index 000000000..5ce21a548
+--- /dev/null
++++ b/drivers/jesd204/Kconfig
+@@ -0,0 +1,34 @@
++# SPDX-License-Identifier: GPL-2.0+
++#
++# JESD204 framework configuration
++#
++
++menuconfig JESD204
++	tristate "JESD204 High-Speed Serial Interface Framework"
++	depends on OF
++	help
++	  The JESD204 is a "Serial Interface for data converters"
++	  which describes a serialized interface between data converters
++	  and logic devices. It contains normative information to enable
++	  chip designers to implement devices that communicate with other
++	  devices covered by this specification.
++
++	  The JESD204 framework provides a unified model for supporting
++	  initialization and operation of JESD204 transceivers, which aims
++	  at reducing complexity when managing these types of devices.
++
++config JESD204_TOP_DEVICE
++	tristate "JESD204 Top Device"
++	depends on JESD204
++	help
++	  Say yes here to build support for the generic jes204-top device.
++	  The jesd204-top-device provides the link parameter for all other
++	  link devices. Usually this is the converter device. However, in some
++	  situations when using Multilink and some links are originating or
++	  terminating on a separate system/FPGA entity, the converter device
++	  itself might not be part of the TOPOLOGY.
++	  This generic top-device can be used to provide the necessary
++	  link parameters.
++
++	  To compile this driver as a module, choose M here: the module will be
++	  called jesd204_top_device.
+\ No newline at end of file
+diff --git a/drivers/jesd204/Makefile b/drivers/jesd204/Makefile
+new file mode 100644
+index 000000000..c4d5a9ec7
+--- /dev/null
++++ b/drivers/jesd204/Makefile
+@@ -0,0 +1,12 @@
++# SPDX-License-Identifier: GPL-2.0+
++#
++# Makefile for the JESD204 core.
++#
++
++obj-$(CONFIG_JESD204) += jesd204.o
++jesd204-y := \
++	jesd204-fsm.o \
++	jesd204-sysfs.o \
++	jesd204-core.o
++
++obj-$(CONFIG_JESD204_TOP_DEVICE) += jesd204_top_device.o
+diff --git a/drivers/jesd204/attr.h b/drivers/jesd204/attr.h
+new file mode 100644
+index 000000000..b80351191
+--- /dev/null
++++ b/drivers/jesd204/attr.h
+@@ -0,0 +1,35 @@
++
++/* FIXME: see if this helper is useful for upstream & how or find alternative */
++/**
++ * match_attribute_name - matches given name in an array of attributes
++ * @array: array of @attribute
++ * @n: number of attributes in the array
++ * @name: name string to match with
++ *
++ * Returns index of an attribute with name @name in the @array or -EINVAL,
++ * just like match_string().
++ */
++static int __match_attribute_name(const struct attribute *array,
++				  size_t n, const char *string)
++
++{
++	int index;
++
++	for (index = 0; index < n; index++) {
++		if (!strcmp(array[index].name, string))
++			return index;
++	}
++
++	return -EINVAL;
++}
++
++/**
++ * match_attribute_name - matches given name in an array of attributes
++ * @_a: array of @attribute
++ * @_s: name string to match with
++ *
++ * Helper for __match_attribute_name(). Calculates the size of @a automatically.
++ */
++#define match_attribute_name(_a, _s) \
++	__match_attribute_name(_a, ARRAY_SIZE(_a), _s)
++
+diff --git a/drivers/jesd204/jesd204-core.c b/drivers/jesd204/jesd204-core.c
+new file mode 100644
+index 000000000..86671f21a
+--- /dev/null
++++ b/drivers/jesd204/jesd204-core.c
+@@ -0,0 +1,1200 @@
++// SPDX-License-Identifier: GPL-2.0+
++/**
++ * The JESD204 framework - core logic
++ *
++ * Copyright (c) 2019 Analog Devices Inc.
++ */
++
++#define pr_fmt(fmt) "jesd204: " fmt
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/device.h>
++#include <linux/of.h>
++#include <linux/property.h>
++#include <linux/slab.h>
++
++#include "jesd204-priv.h"
++
++/* IDA to assign each registered device a unique id */
++static DEFINE_IDA(jesd204_ida);
++
++static struct bus_type jesd204_bus_type = {
++	.name = "jesd204",
++};
++
++static LIST_HEAD(jesd204_device_list);
++static LIST_HEAD(jesd204_topologies);
++
++static unsigned int jesd204_device_count;
++static unsigned int jesd204_topologies_count;
++
++static unsigned int jesd204_con_id_counter;
++static bool jesd204_dyn_dt_change;
++
++static void jesd204_dev_unregister(struct jesd204_dev *jdev);
++
++int jesd204_get_active_links_num(struct jesd204_dev *jdev)
++{
++	struct jesd204_dev_top *jdev_top;
++
++	if (!jdev)
++		return -EINVAL;
++
++	jdev_top = jesd204_dev_get_topology_top_dev(jdev);
++	if (!jdev_top) {
++		jesd204_err(jdev, "Could not find top-level device\n");
++		return -EFAULT;
++	}
++
++	return jdev_top->num_links;
++}
++
++int jesd204_get_links_data(struct jesd204_dev *jdev,
++			   struct jesd204_link ** const links,
++			   const unsigned int num_links)
++{
++	struct jesd204_dev_top *jdev_top;
++	unsigned int i;
++
++	if (!jdev || !links || !num_links)
++		return -EINVAL;
++
++	jdev_top = jesd204_dev_get_topology_top_dev(jdev);
++	if (!jdev_top) {
++		jesd204_err(jdev, "Could not find top-level device\n");
++		return -EFAULT;
++	}
++
++	if (jdev_top->num_links != num_links) {
++		jesd204_err(jdev,
++			    "Link number mismatch: top-level has %u, call has %u\n",
++			    jdev_top->num_links, num_links);
++		return -EINVAL;
++	}
++
++	for (i = 0; i < jdev_top->num_links; i++)
++		links[i] = &jdev_top->active_links[i].link;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(jesd204_get_links_data);
++
++const char *jesd204_link_get_state_str(const struct jesd204_link *lnk)
++{
++	struct jesd204_link_opaque *ol =
++		container_of(lnk, struct jesd204_link_opaque, link);
++
++	return jesd204_state_str(ol->state);
++}
++EXPORT_SYMBOL_GPL(jesd204_link_get_state_str);
++
++bool jesd204_link_get_paused(const struct jesd204_link *lnk)
++{
++	struct jesd204_link_opaque *ol =
++		container_of(lnk, struct jesd204_link_opaque, link);
++
++	return ol->fsm_paused;
++}
++EXPORT_SYMBOL_GPL(jesd204_link_get_paused);
++
++int jesd204_device_count_get()
++{
++	return jesd204_device_count;
++}
++
++static bool jesd204_dev_has_con_in_topology(struct jesd204_dev *jdev,
++					    struct jesd204_dev_top *jdev_top)
++{
++	struct jesd204_dev_con_out *c;
++	int i;
++
++	list_for_each_entry(c, &jdev->outputs, entry) {
++		if (c->jdev_top == jdev_top)
++			return true;
++	}
++
++	for (i = 0; i < jdev->inputs_count; i++) {
++		c = jdev->inputs[i];
++		if (c->jdev_top == jdev_top)
++			return true;
++	}
++
++	return false;
++}
++
++static int jesd204_link_validate_params(const struct jesd204_link *lnk)
++{
++	if (!lnk->num_lanes) {
++		pr_err("link[%u], number of lanes is zero\n", lnk->link_id);
++		return -EINVAL;
++	}
++
++	if (!lnk->num_converters) {
++		pr_err("link[%u], number of converters is zero\n", lnk->link_id);
++		return -EINVAL;
++	}
++
++	if (!lnk->bits_per_sample) {
++		pr_err("link[%u], bits-per-sample is zero\n", lnk->link_id);
++		return -EINVAL;
++	}
++
++	if (!lnk->sample_rate) {
++		pr_err("link[%u], sample rate is zero\n", lnk->link_id);
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++int jesd204_link_get_rate(struct jesd204_link *lnk, u64 *lane_rate_hz)
++{
++	u64 rate, encoding_n, encoding_d;
++	u32 sample_rate_div;
++	int ret;
++
++	ret = jesd204_link_validate_params(lnk);
++	if (ret)
++		return ret;
++
++	switch (lnk->jesd_version) {
++	case JESD204_VERSION_C:
++		switch (lnk->jesd_encoder) {
++		case JESD204_ENCODER_64B66B:
++			encoding_n = 66; /* JESD 204C */
++			encoding_d = 64;
++			break;
++		case JESD204_ENCODER_8B10B:
++			encoding_n = 10; /* JESD 204C */
++			encoding_d = 8;
++			break;
++		case JESD204_ENCODER_64B80B:
++			encoding_n = 80; /* JESD 204C */
++			encoding_d = 64;
++			break;
++		default:
++			return -EINVAL;
++		}
++		break;
++	default:
++		encoding_n = 10; /* JESD 204AB */
++		encoding_d = 8;
++		break;
++	}
++
++	sample_rate_div = lnk->sample_rate_div ? lnk->sample_rate_div : 1;
++
++	rate = lnk->num_converters * lnk->bits_per_sample *
++		encoding_n * lnk->sample_rate;
++	do_div(rate, lnk->num_lanes * encoding_d * sample_rate_div);
++
++	*lane_rate_hz = rate;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(jesd204_link_get_rate);
++
++int jesd204_link_get_rate_khz(struct jesd204_link *lnk,
++			      unsigned long *lane_rate_khz)
++{
++	u64 lane_rate_hz;
++	int ret;
++
++	ret = jesd204_link_get_rate(lnk, &lane_rate_hz);
++	if (ret)
++		return ret;
++
++	*lane_rate_khz = DIV_ROUND_CLOSEST_ULL(lane_rate_hz, 1000);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(jesd204_link_get_rate_khz);
++
++int jesd204_link_get_device_clock(struct jesd204_link *lnk,
++				  unsigned long *device_clock)
++{
++	u64 lane_rate_hz;
++	u32 encoding_n;
++	int ret;
++
++	ret = jesd204_link_get_rate(lnk, &lane_rate_hz);
++	if (ret)
++		return ret;
++
++	switch (lnk->jesd_version) {
++	case JESD204_VERSION_C:
++		switch (lnk->jesd_encoder) {
++		case JESD204_ENCODER_64B66B:
++			encoding_n = 66; /* JESD 204C */
++			break;
++		case JESD204_ENCODER_8B10B:
++			encoding_n = 40; /* JESD 204ABC */
++			break;
++		case JESD204_ENCODER_64B80B:
++			encoding_n = 80; /* JESD 204C */
++			break;
++		default:
++			return -EINVAL;
++		}
++		break;
++	default:
++		encoding_n = 40; /* JESD 204AB */
++		break;
++	}
++
++	do_div(lane_rate_hz, encoding_n);
++
++	*device_clock = lane_rate_hz;
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(jesd204_link_get_device_clock);
++
++void jesd204_copy_link_params(struct jesd204_link *dst,
++			      const struct jesd204_link *src)
++{
++	dst->is_transmit = src->is_transmit;
++	dst->num_lanes = src->num_lanes;
++	dst->num_converters = src->num_converters;
++	dst->octets_per_frame = src->octets_per_frame;
++	dst->frames_per_multiframe = src->frames_per_multiframe;
++	dst->num_of_multiblocks_in_emb = src->num_of_multiblocks_in_emb;
++	dst->bits_per_sample = src->bits_per_sample;
++	dst->converter_resolution = src->converter_resolution;
++	dst->jesd_version = src->jesd_version;
++	dst->jesd_encoder = src->jesd_encoder;
++	dst->subclass = src->subclass;
++	dst->device_id = src->device_id;
++	dst->bank_id = src->bank_id;
++	dst->scrambling = src->scrambling;
++	dst->high_density = src->high_density;
++	dst->ctrl_words_per_frame_clk = src->ctrl_words_per_frame_clk;
++	dst->ctrl_bits_per_sample = src->ctrl_bits_per_sample;
++	dst->samples_per_conv_frame = src->samples_per_conv_frame;
++	dst->dac_adj_resolution_steps = src->dac_adj_resolution_steps;
++	dst->dac_adj_direction = src->dac_adj_direction;
++	dst->dac_phase_adj = src->dac_phase_adj;
++	dst->sysref.mode = src->sysref.mode;
++	dst->sysref.capture_falling_edge = src->sysref.capture_falling_edge;
++	dst->sysref.valid_falling_edge = src->sysref.valid_falling_edge;
++	dst->sysref.lmfc_offset = src->sysref.lmfc_offset;
++}
++EXPORT_SYMBOL_GPL(jesd204_copy_link_params);
++
++int jesd204_link_get_lmfc_lemc_rate(struct jesd204_link *lnk,
++				    unsigned long *rate_hz)
++{
++	u64 lane_rate_hz;
++	u32 bkw;
++	int ret;
++
++	ret = jesd204_link_get_rate(lnk, &lane_rate_hz);
++	if (ret)
++		return ret;
++
++	switch (lnk->jesd_version) {
++	case JESD204_VERSION_C:
++		switch (lnk->jesd_encoder) {
++		case JESD204_ENCODER_64B66B:
++			bkw = 66; /* JESD 204C */
++			/* fall-through */
++		case JESD204_ENCODER_64B80B:
++			if (lnk->jesd_encoder == JESD204_ENCODER_64B80B)
++				bkw = 80; /* JESD 204C */
++
++			if (lnk->num_of_multiblocks_in_emb) {
++				do_div(lane_rate_hz, bkw * 32 *
++					lnk->num_of_multiblocks_in_emb);
++			} else {
++				lane_rate_hz *= 8;
++				do_div(lane_rate_hz, bkw *
++					lnk->octets_per_frame *
++					lnk->frames_per_multiframe);
++			}
++			break;
++		case JESD204_ENCODER_8B10B:
++			do_div(lane_rate_hz, 10 * lnk->octets_per_frame *
++				lnk->frames_per_multiframe);
++			break;
++		default:
++			return -EINVAL;
++		}
++		break;
++	default:
++		do_div(lane_rate_hz, 10 * lnk->octets_per_frame *
++			lnk->frames_per_multiframe);
++		break;
++	}
++
++	*rate_hz = lane_rate_hz;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(jesd204_link_get_lmfc_lemc_rate);
++
++struct jesd204_dev_top *jesd204_dev_get_topology_top_dev(struct jesd204_dev *jdev)
++{
++	struct jesd204_dev_top *jdev_top = jesd204_dev_top_dev(jdev);
++
++	if (jdev_top)
++		return jdev_top;
++
++	/* FIXME: enforce that one jdev object can only be in one topology */
++	list_for_each_entry(jdev_top, &jesd204_topologies, entry) {
++		if (!jesd204_dev_has_con_in_topology(jdev, jdev_top))
++			continue;
++		return jdev_top;
++	}
++
++	jesd204_warn(jdev, "Device isn't a top-device, nor does it belong to topology with top-device\n");
++
++	return NULL;
++}
++
++int jesd204_sysref_async(struct jesd204_dev *jdev)
++{
++	struct jesd204_dev_top *jdev_top = jesd204_dev_get_topology_top_dev(jdev);
++	const struct jesd204_dev_data *dev_data;
++
++	if (!jdev_top)
++		return -EFAULT;
++
++	/* No SYSREF registered for this topology */
++	if (!jdev_top->jdev_sysref)
++		return 0;
++
++	if (!jdev_top->jdev_sysref->dev_data)
++		return -EFAULT;
++
++	dev_data = jdev_top->jdev_sysref->dev_data;
++
++	/* By now, this should have been validated to have sysref_cb() */
++	return dev_data->sysref_cb(jdev_top->jdev_sysref);
++}
++EXPORT_SYMBOL(jesd204_sysref_async);
++
++int jesd204_sysref_async_force(struct jesd204_dev *jdev)
++{
++	struct jesd204_dev_top *jdev_top = jesd204_dev_get_topology_top_dev(jdev);
++	const struct jesd204_dev_data *dev_data;
++
++	if (!jdev_top)
++		return -EFAULT;
++
++	/* Primary SYSREF registered for this topology? */
++	if (jdev_top->jdev_sysref)
++		return jesd204_sysref_async(jdev);
++
++	/* No SYSREF registered for this topology */
++	if (!jdev_top->jdev_sysref_sec)
++		return 0;
++
++	if (!jdev_top->jdev_sysref_sec->dev_data)
++		return -EFAULT;
++
++	dev_data = jdev_top->jdev_sysref_sec->dev_data;
++
++	/* By now, this should have been validated to have sysref_cb() */
++	return dev_data->sysref_cb(jdev_top->jdev_sysref_sec);
++}
++EXPORT_SYMBOL(jesd204_sysref_async_force);
++
++bool jesd204_dev_is_top(struct jesd204_dev *jdev)
++{
++	return jdev && jdev->is_top;
++}
++EXPORT_SYMBOL(jesd204_dev_is_top);
++
++static inline bool dev_is_jesd204_dev(struct device *dev)
++{
++	return device_property_read_bool(dev, "jesd204-device");
++}
++
++void *jesd204_dev_priv(struct jesd204_dev *jdev)
++{
++	return jdev->priv;
++}
++EXPORT_SYMBOL_GPL(jesd204_dev_priv);
++
++struct jesd204_dev *jesd204_dev_from_device(struct device *dev)
++{
++	struct jesd204_dev *jdev;
++
++	if (!dev)
++		return NULL;
++
++	list_for_each_entry(jdev, &jesd204_device_list, entry) {
++		if (jdev->dev.parent && jdev->dev.parent == dev)
++			return jdev;
++	}
++
++	return NULL;
++}
++EXPORT_SYMBOL_GPL(jesd204_dev_from_device);
++
++struct device *jesd204_dev_to_device(struct jesd204_dev *jdev)
++{
++	return jdev ? jdev->dev.parent : NULL;
++}
++EXPORT_SYMBOL_GPL(jesd204_dev_to_device);
++
++static void __jesd204_printk(const char *level, const struct jesd204_dev *jdev,
++			     struct va_format *vaf)
++{
++	const struct device *dev;
++
++	if (!jdev) {
++		printk("%sjesd204: (NULL jesd204 device *): %pV", level, vaf);
++		return;
++	}
++
++	if (!jdev->dev.parent) {
++		printk("%sjesd204: %pOF: %pV", level, jdev->np, vaf);
++		return;
++	}
++
++	dev = &jdev->dev;
++	dev_printk_emit(level[1] - '0', dev, "jesd204: %pOF,%s,parent=%s: %pV",
++			jdev->np,
++			dev_name(dev),
++			dev_name(dev->parent),
++			vaf);
++}
++
++void jesd204_printk(const char *level, const struct jesd204_dev *jdev,
++		    const char *fmt, ...)
++{
++	struct va_format vaf;
++	va_list args;
++
++	va_start(args, fmt);
++
++	vaf.fmt = fmt;
++	vaf.va = &args;
++
++	__jesd204_printk(level, jdev, &vaf);
++
++	va_end(args);
++}
++
++static int jesd204_dev_alloc_links(struct jesd204_dev_top *jdev_top)
++{
++	struct jesd204_link_opaque *links;
++	size_t mem_size;
++	unsigned int i;
++
++	mem_size = jdev_top->num_links * sizeof(*links);
++
++	links = kzalloc(mem_size, GFP_KERNEL);
++	if (!links)
++		return -ENOMEM;
++	jdev_top->active_links = links;
++
++	for (i = 0; i < jdev_top->num_links; i++) {
++		links[i].jdev_top = jdev_top;
++		links[i].link_idx = i;
++		links[i].link.link_id = jdev_top->link_ids[i];
++	}
++
++	links = kzalloc(mem_size, GFP_KERNEL);
++	if (!links) {
++		kfree(jdev_top->active_links);
++		return -ENOMEM;
++	}
++	jdev_top->staged_links = links;
++
++	return 0;
++}
++
++static int jesd204_dev_init_stop_states(struct jesd204_dev *jdev,
++					struct device_node *np)
++{
++	unsigned int stop_states[JESD204_FSM_STATES_NUM];
++	int fsm_state;
++	int i, ret;
++
++	ret = of_property_read_variable_u32_array(np, "jesd204-stop-states",
++						  stop_states,
++						  1, JESD204_FSM_STATES_NUM);
++	if (ret <= 0)
++		return 0;
++
++	for (i = 0; i < ret; i++) {
++		if (stop_states[i] >= JESD204_FSM_STATES_NUM) {
++			pr_err("%pOF: Invalid state ID %u\n", np,
++			       stop_states[i]);
++			return -EINVAL;
++		}
++		jdev->stop_states[stop_states[i]] = true;
++		fsm_state = stop_states[i] + JESD204_STATE_FSM_OFFSET;
++		pr_info("%pOF: stop state: '%s'\n", np,
++			jesd204_state_str(fsm_state));
++	}
++
++	return 0;
++}
++
++static struct jesd204_dev *jesd204_dev_alloc(struct device_node *np)
++{
++	struct jesd204_dev_top *jdev_top;
++	struct jesd204_dev *jdev;
++	unsigned int link_ids[JESD204_MAX_LINKS];
++	u32 topo_id;
++	int i, ret, id;
++
++	id = ida_simple_get(&jesd204_ida, 0, 0, GFP_KERNEL);
++	if (id < 0) {
++		pr_err("%pOF: Unable to get unique ID for device\n", np);
++		return ERR_PTR(id);
++	}
++
++	if (of_property_read_u32(np, "jesd204-top-device", &topo_id) == 0) {
++		ret = of_property_read_variable_u32_array(np,
++							  "jesd204-link-ids",
++							  link_ids,
++							  1,
++							  JESD204_MAX_LINKS);
++		if (ret < 0) {
++			pr_err("%pOF error getting 'jesd204-link-ids': %d\n",
++			       np, ret);
++			goto err_free_id;
++		}
++
++		jdev_top = kzalloc(sizeof(*jdev_top), GFP_KERNEL);
++		if (!jdev_top) {
++			ret = -ENOMEM;
++			goto err_free_id;
++		}
++
++		jdev = &jdev_top->jdev;
++
++		jdev_top->topo_id = topo_id;
++		jdev_top->num_links = ret;
++		for (i = 0; i < jdev_top->num_links; i++)
++			jdev_top->link_ids[i] = link_ids[i];
++
++		ret = jesd204_dev_alloc_links(jdev_top);
++		if (ret) {
++			kfree(jdev_top);
++			goto err_free_id;
++		}
++
++		jdev->is_top = true;
++
++		if (of_property_read_bool(np, "jesd204-ignore-errors"))
++			for (i = 0; i < jdev_top->num_links; i++)
++				jdev_top->active_links[i].fsm_ignore_errors
++				= true;
++
++		list_add(&jdev_top->entry, &jesd204_topologies);
++		jesd204_topologies_count++;
++	} else {
++		jdev = kzalloc(sizeof(*jdev), GFP_KERNEL);
++		if (!jdev) {
++			ret = -ENOMEM;
++			goto err_free_id;
++		}
++	}
++
++	jdev->is_sysref_provider = of_property_read_bool(np,
++		"jesd204-sysref-provider");
++	jdev->is_sec_sysref_provider = of_property_read_bool(np,
++		"jesd204-secondary-sysref-provider");
++
++	ret = jesd204_dev_init_stop_states(jdev, np);
++	if (ret)
++		goto err_free_id;
++
++	jdev->id = id;
++	jdev->np = of_node_get(np);
++
++	INIT_LIST_HEAD(&jdev->outputs);
++
++	list_add(&jdev->entry, &jesd204_device_list);
++	jesd204_device_count++;
++
++	return jdev;
++
++err_free_id:
++	ida_simple_remove(&jesd204_ida, id);
++
++	return ERR_PTR(ret);
++}
++
++static struct jesd204_dev *jesd204_dev_find_by_of_node(struct device_node *np)
++{
++	struct jesd204_dev *jdev = NULL, *jdev_it;
++
++	if (!np)
++		return NULL;
++
++	list_for_each_entry(jdev_it, &jesd204_device_list, entry) {
++		if (jdev_it->np == np) {
++			jdev = jdev_it;
++			break;
++		}
++	}
++
++	return jdev;
++}
++
++static struct jesd204_dev_con_out *jesd204_dev_find_output_con(
++		struct jesd204_dev *jdev,
++		struct of_phandle_args *args)
++{
++	struct jesd204_dev_con_out *con;
++	unsigned int i;
++
++	/* find an existing output connection for the current of args */
++	list_for_each_entry(con, &jdev->outputs, entry) {
++		if (args->np != con->of.np)
++			continue;
++		if (args->args_count != con->of.args_count)
++			continue;
++		for (i = 0; i < args->args_count; i++) {
++			if (args->args[i] != con->of.args[i])
++				break;
++		}
++		if (i != args->args_count)
++			continue;
++		return con;
++	}
++
++	return NULL;
++}
++
++static int jesd204_dev_create_con(struct jesd204_dev *jdev,
++				  struct of_phandle_args *args)
++{
++	struct jesd204_dev_con_out *con;
++	struct jesd204_dev *jdev_in;
++	struct jesd204_dev_list_entry *e;
++
++	if (args->args_count < 2) {
++		pr_err("connection %pOF->%pOF requires 2 args minimum\n",
++		       args->np, jdev->np);
++		return -EINVAL;
++	}
++
++	jdev_in = jesd204_dev_find_by_of_node(args->np);
++	if (!jdev_in) {
++		pr_err("connection %pOF->%pOF invalid\n", args->np, jdev->np);
++		return -ENOENT;
++	}
++
++	e = kzalloc(sizeof(*e), GFP_KERNEL);
++	if (!e)
++		return -ENOMEM;
++
++	con = jesd204_dev_find_output_con(jdev_in, args);
++	if (!con) {
++		con = kzalloc(sizeof(*con), GFP_KERNEL);
++		if (!con) {
++			kfree(e);
++			return -ENOMEM;
++		}
++
++		con->id = jesd204_con_id_counter++;
++		con->topo_id = args->args[0];
++		con->link_id = args->args[1];
++		con->link_idx = JESD204_LINKS_ALL;
++		con->owner = jdev_in;
++		INIT_LIST_HEAD(&con->dests);
++
++		memcpy(&con->of, args, sizeof(con->of));
++		list_add(&con->entry, &jdev_in->outputs);
++		jdev_in->outputs_count++;
++	}
++
++	pr_info("created con: id=%u, topo=%u, link=%u, %pOF <-> %pOF\n",
++		con->id, con->topo_id, con->link_id, con->owner->np, jdev->np);
++
++	e->jdev = jdev;
++	list_add(&e->entry, &con->dests);
++	con->dests_count++;
++
++	jdev->inputs[jdev->inputs_count] = con;
++	jdev->inputs_count++;
++
++	return 0;
++}
++
++static int jesd204_of_device_create_cons(struct jesd204_dev *jdev)
++{
++	struct device_node *np = jdev->np;
++	struct of_phandle_args args;
++	int i, c, ret;
++
++	c = of_count_phandle_with_args(np, "jesd204-inputs", "#jesd204-cells");
++	if (c == -ENOENT || c == 0)
++		return 0;
++	if (c < 0)
++		return c;
++
++	jdev->inputs = kcalloc(c, sizeof(*jdev->inputs), GFP_KERNEL);
++	if (!jdev->inputs)
++		return -ENOMEM;
++
++	for (i = 0; i < c; i++) {
++		ret = of_parse_phandle_with_args(np,
++						 "jesd204-inputs",
++						 "#jesd204-cells",
++						 i, &args);
++		/**
++		 * If one bad/non-existing connection is found, then all
++		 * JESD204 topologies won't be initialized. We may
++		 * improve this later, to allow the good configs
++		 */
++		if (ret < 0)
++			return ret;
++
++		ret = jesd204_dev_create_con(jdev, &args);
++		of_node_put(args.np);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int jesd204_of_create_devices(void)
++{
++	struct jesd204_dev_top *jdev_top;
++	struct jesd204_dev *jdev;
++	struct device_node *np;
++	int ret;
++
++	for_each_node_with_property(np, "jesd204-device") {
++		jdev = jesd204_dev_alloc(np);
++		if (IS_ERR(jdev))
++			return PTR_ERR(jdev);
++	}
++
++	list_for_each_entry(jdev, &jesd204_device_list, entry) {
++		ret = jesd204_of_device_create_cons(jdev);
++		if (ret)
++			return ret;
++	}
++
++	list_for_each_entry(jdev_top, &jesd204_topologies, entry) {
++		ret = jesd204_init_topology(jdev_top);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int jesd204_dev_init_link_lane_ids(struct jesd204_dev_top *jdev_top,
++					  unsigned int link_idx,
++					  struct jesd204_link *jlink)
++{
++	struct jesd204_dev *jdev = &jdev_top->jdev;
++	u8 id;
++
++	if (!jlink->num_lanes) {
++		jesd204_err(jdev, "JESD204 link [%u] number of lanes is 0\n",
++			    jlink->link_id);
++		jlink->lane_ids = NULL;
++		return -EINVAL;
++	}
++
++	/* We have some lane IDs provided statically for this link ID; exit */
++	if (jdev_top->init_links &&
++	    jdev_top->init_links[link_idx].lane_ids)
++		return 0;
++
++	if (jlink->lane_ids)
++		kfree(jlink->lane_ids);
++
++	jlink->lane_ids = kmalloc_array(jlink->num_lanes,
++					sizeof(*jlink->lane_ids),
++					GFP_KERNEL);
++	if (!jlink->lane_ids)
++		return -ENOMEM;
++
++	/* Assign lane IDs, based on lane index */
++	for (id = 0; id < jlink->num_lanes; id++)
++		jlink->lane_ids[id] = id;
++
++	return 0;
++}
++
++static int __jesd204_dev_init_link_data(struct jesd204_dev_top *jdev_top,
++					unsigned int link_idx)
++{
++	struct jesd204_link_opaque *ol;
++	int ret;
++
++	ol = &jdev_top->active_links[link_idx];
++	ol->link.link_id = jdev_top->link_ids[link_idx];
++	ol->jdev_top = jdev_top;
++	ol->link_idx = link_idx;
++	ol->link.sysref.lmfc_offset = JESD204_LMFC_OFFSET_UNINITIALIZED;
++	ret = jesd204_dev_init_link_lane_ids(jdev_top, link_idx, &ol->link);
++	if (ret)
++		return ret;
++
++	memcpy(&jdev_top->staged_links[link_idx], ol,
++	       sizeof(jdev_top->staged_links[link_idx]));
++
++	return 0;
++}
++
++/* FIXME: see about maybe handling lane IDs assigned via the link_op for init links */
++int jesd204_dev_init_link_data(struct jesd204_dev_top *jdev_top,
++			       unsigned int link_idx)
++{
++	int ret;
++
++	if (link_idx != JESD204_LINKS_ALL)
++		return __jesd204_dev_init_link_data(jdev_top, link_idx);
++
++	for (link_idx = 0; link_idx < jdev_top->num_links; link_idx++) {
++		ret = __jesd204_dev_init_link_data(jdev_top, link_idx);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int jesd204_dev_init_links_data(struct device *parent,
++				       struct jesd204_dev *jdev,
++				       const struct jesd204_dev_data *init)
++{
++	struct jesd204_dev_top *jdev_top = jesd204_dev_top_dev(jdev);
++	unsigned int i;
++
++	if (!jdev_top)
++		return 0;
++
++	if (!init->max_num_links) {
++		jesd204_err(jdev, "max_num_links shouldn't be zero\n");
++		return -EINVAL;
++	}
++
++	if (init->max_num_links < jdev_top->num_links) {
++		jesd204_err(jdev,
++			"Driver supports %u number of links, DT specified %u\n",
++			init->max_num_links, jdev_top->num_links);
++		return -EINVAL;
++	}
++
++	/**
++	 * Framework users should provide at least initial JESD204 link data,
++	 * or a link init op/callback which should do JESD204 link init.
++	 */
++	if (!init->links &&
++	    !init->state_ops &&
++	    !init->state_ops[JESD204_OP_LINK_INIT].per_link) {
++		jesd204_err(jdev,
++			    "num_links is non-zero, but no links data provided\n");
++		return -EINVAL;
++	}
++
++	if (!init->links)
++		return 0;
++
++	for (i = 0; i < jdev_top->num_links; i++) {
++		memcpy(&jdev_top->active_links[i].link, &init->links[i],
++		       sizeof(struct jesd204_link));
++		memcpy(&jdev_top->staged_links[i].link, &init->links[i],
++		       sizeof(struct jesd204_link));
++	}
++
++	jdev_top->init_links = init->links;
++
++	return 0;
++}
++
++static void jesd204_dev_init_top_data(struct jesd204_dev *jdev,
++				      const struct jesd204_dev_data *init)
++{
++	struct jesd204_dev_top *jdev_top;
++
++	jdev_top = jesd204_dev_top_dev(jdev);
++	if (!jdev_top)
++		return;
++
++	jdev_top->num_retries = init->num_retries;
++}
++
++static struct jesd204_dev *jesd204_dev_register(struct device *dev,
++						const struct jesd204_dev_data *init)
++{
++	struct jesd204_dev *jdev;
++	int ret;
++
++	if (!dev || !init) {
++		dev_err(dev, "Invalid register arguments\n");
++		return ERR_PTR(-EINVAL);
++	}
++
++	jdev = jesd204_dev_from_device(dev);
++	if (jdev) {
++		dev_err(dev, "Device already registered with framework\n");
++		return ERR_PTR(-EEXIST);
++	}
++
++	jdev = jesd204_dev_find_by_of_node(dev->of_node);
++	if (!jdev && !jesd204_dyn_dt_change) {
++		dev_err(dev, "Device has no configuration node\n");
++		return ERR_PTR(-ENODEV);
++	}
++
++	if (jesd204_dyn_dt_change)
++		return ERR_PTR(-EPROBE_DEFER);
++
++	ret = jesd204_dev_init_links_data(dev, jdev, init);
++	if (ret)
++		return ERR_PTR(ret);
++
++	jesd204_dev_init_top_data(jdev, init);
++
++	jdev->dev.parent = dev;
++	jdev->dev_data = init;
++	jdev->dev.bus = &jesd204_bus_type;
++	device_initialize(&jdev->dev);
++	dev_set_name(&jdev->dev, "jesd204:%d", jdev->id);
++
++	ret = device_add(&jdev->dev);
++	if (ret) {
++		put_device(&jdev->dev);
++		goto err_uninit_device;
++	}
++
++	if (init->sizeof_priv) {
++		jdev->priv = devm_kzalloc(dev, init->sizeof_priv,
++					  GFP_KERNEL);
++		if (!jdev->priv) {
++			ret = -ENOMEM;
++			goto err_device_del;
++		}
++	}
++
++	ret = jesd204_dev_create_sysfs(jdev);
++	if (ret)
++		goto err_device_del;
++
++	return jdev;
++
++err_device_del:
++	device_del(&jdev->dev);
++err_uninit_device:
++	memset(&jdev->dev, 0, sizeof(jdev->dev));
++
++	return ERR_PTR(ret);
++}
++
++static void jesd204_dev_destroy_cons(struct jesd204_dev *jdev)
++{
++	struct jesd204_dev_con_out *c, *c1;
++	struct jesd204_dev_list_entry *e, *e1;
++
++	kfree(jdev->inputs);
++
++	list_for_each_entry_safe(c, c1, &jdev->outputs, entry) {
++		list_del(&c->entry);
++		list_for_each_entry_safe(e, e1, &c->dests, entry) {
++			list_del(&e->entry);
++			kfree(e);
++		}
++		kfree(c);
++	}
++}
++
++static void jesd204_of_unregister_devices(void)
++{
++	struct jesd204_dev_top *jdev_top;
++	struct jesd204_dev *jdev, *j;
++
++	list_for_each_entry_safe(jdev, j, &jesd204_device_list, entry) {
++		jesd204_dev_unregister(jdev);
++		jesd204_dev_destroy_cons(jdev);
++		of_node_put(jdev->np);
++		list_del(&jdev->entry);
++		jesd204_device_count--;
++		if (!jdev->is_top) {
++			kfree(jdev);
++			continue;
++		}
++		jdev_top = jesd204_dev_top_dev(jdev);
++		list_del(&jdev_top->entry);
++		kfree(jdev_top);
++		jesd204_topologies_count--;
++	}
++}
++
++/**
++ * jesd204_dev_unregister() - unregister a device from the JESD204 subsystem
++ * @jdev:		Device structure representing the device.
++ **/
++static void jesd204_dev_unregister(struct jesd204_dev *jdev)
++{
++	if (IS_ERR_OR_NULL(jdev))
++		return;
++
++	jesd204_dev_destroy_sysfs(jdev);
++
++	if (jdev->dev.parent)
++		device_del(&jdev->dev);
++
++	jesd204_fsm_stop(jdev, JESD204_LINKS_ALL);
++
++	memset(&jdev->dev, 0, sizeof(jdev->dev));
++}
++
++static void devm_jesd204_dev_unreg(struct device *dev, void *res)
++{
++	jesd204_dev_unregister(*(struct jesd204_dev **)res);
++}
++
++struct jesd204_dev *devm_jesd204_dev_register(struct device *dev,
++					      const struct jesd204_dev_data *i)
++{
++	struct jesd204_dev **jdevp, *jdev;
++
++	if (!dev_is_jesd204_dev(dev))
++		return NULL;
++
++	jdevp = devres_alloc(devm_jesd204_dev_unreg, sizeof(*jdevp),
++			     GFP_KERNEL);
++	if (!jdevp)
++		return ERR_PTR(-ENOMEM);
++
++	jdev = jesd204_dev_register(dev, i);
++	if (!IS_ERR(jdev)) {
++		*jdevp = jdev;
++		devres_add(dev, jdevp);
++	} else {
++		devres_free(jdevp);
++	}
++
++	return jdev;
++}
++EXPORT_SYMBOL_GPL(devm_jesd204_dev_register);
++
++
++static int jesd204_overlay_has_device(struct device_node *node)
++{
++	struct device_node *dn;
++	int i = 0;
++
++	for_each_available_child_of_node(node, dn) {
++		if (of_property_read_bool(dn, "jesd204-device"))
++			i++;
++	}
++
++	return i;
++}
++
++/**
++ * of_jesd204_notify - reconfig notifier for dynamic DT changes
++ * @nb:		notifier block
++ * @action:	notifier action
++ * @arg:	reconfig data
++ *
++ */
++static int of_jesd204_notify(struct notifier_block *nb,
++				 unsigned long action, void *arg)
++{
++	struct of_overlay_notify_data *nd = arg;
++	int devs, ret =  0;
++
++	switch (action) {
++	case OF_OVERLAY_PRE_APPLY:
++		pr_debug("%s OF_OVERLAY_PRE_APPLY\n", __func__);
++
++		devs = jesd204_overlay_has_device(nd->overlay);
++		if (!devs)
++			return NOTIFY_OK;
++
++		if (jesd204_device_count || jesd204_topologies_count) {
++			pr_err("%s Failed: base devicetree must not have any jesd204-devices",
++				__func__);
++			return notifier_from_errno(-EOPNOTSUPP);
++		}
++
++		jesd204_dyn_dt_change = true;
++
++		return NOTIFY_OK;
++	case OF_OVERLAY_POST_APPLY:
++		pr_debug("%s OF_OVERLAY_POST_APPLY\n", __func__);
++
++		if (jesd204_dyn_dt_change) {
++			ret = jesd204_of_create_devices();
++
++			pr_info("found %u devices and %u topologies\n",
++				jesd204_device_count, jesd204_topologies_count);
++
++			jesd204_dyn_dt_change = false;
++			if (!ret)
++				driver_deferred_probe_trigger();
++
++			return notifier_from_errno(ret);
++		}
++
++		return NOTIFY_OK;
++	case OF_OVERLAY_PRE_REMOVE:
++		pr_debug("%s OF_OVERLAY_PRE_REMOVE\n", __func__);
++
++		if (jesd204_device_count)
++			return notifier_from_errno(-EOPNOTSUPP);
++
++		return NOTIFY_OK;
++	default:
++		pr_debug("%s Not implemented action: %ld\n", __func__, action);
++		return NOTIFY_OK;
++	}
++}
++
++static struct notifier_block jesd204_of_nb = {
++	.notifier_call = of_jesd204_notify,
++};
++
++static int __init jesd204_init(void)
++{
++	int ret;
++
++	BUILD_BUG_ON(__JESD204_MAX_OPS != JESD204_FSM_STATES_NUM);
++
++	ret  = bus_register(&jesd204_bus_type);
++	if (ret < 0) {
++		pr_err("could not register bus type\n");
++		return ret;
++	}
++
++	ret = jesd204_of_create_devices();
++	if (ret < 0)
++		goto error_unreg_devices;
++
++	ret = of_overlay_notifier_register(&jesd204_of_nb);
++	if (ret)
++		return ret;
++
++	pr_info("found %u devices and %u topologies\n",
++		jesd204_device_count, jesd204_topologies_count);
++
++	return 0;
++
++error_unreg_devices:
++	jesd204_of_unregister_devices();
++	pr_err("framework error: %d\n", ret);
++	return ret;
++}
++
++static void __exit jesd204_exit(void)
++{
++	jesd204_of_unregister_devices();
++	bus_unregister(&jesd204_bus_type);
++	of_overlay_notifier_unregister(&jesd204_of_nb);
++}
++
++subsys_initcall(jesd204_init);
++module_exit(jesd204_exit);
++
++MODULE_AUTHOR("Alexandru Ardelean <alexandru.ardelean@analog.com>");
++MODULE_DESCRIPTION("JESD204 framework core");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/jesd204/jesd204-fsm.c b/drivers/jesd204/jesd204-fsm.c
+new file mode 100644
+index 000000000..e005ab2d4
+--- /dev/null
++++ b/drivers/jesd204/jesd204-fsm.c
+@@ -0,0 +1,1440 @@
++// SPDX-License-Identifier: GPL-2.0+
++/**
++ * The JESD204 framework - finite state machine logic
++ *
++ * Copyright (c) 2019 Analog Devices Inc.
++ */
++
++#include <linux/kernel.h>
++#include <linux/device.h>
++#include <linux/of.h>
++#include <linux/slab.h>
++
++#include "jesd204-priv.h"
++
++#define JESD204_FSM_BUSY	BIT(0)
++
++#define EINVALID_STATE		9000
++
++typedef int (*jesd204_fsm_cb)(struct jesd204_dev *jdev,
++			      struct jesd204_dev_con_out *con,
++			      unsigned int link_idx,
++			      struct jesd204_fsm_data *data);
++
++typedef int (*jesd204_fsm_done_cb)(struct jesd204_dev *jdev,
++				   struct jesd204_fsm_data *data);
++/**
++ * struct jesd204_fsm_data - JESD204 device state change data
++ * @jdev_top		top JESD204 for which this state change
++ * @link_idx		JESD204 link index for this transition
++ * @fsm_change_cb	callback to propagate during a state transition
++ * @fsm_complete_cb	callback to run after a state transition has completed
++ * @cb_data		callback data for @fsm_change_cb
++ * @cur_state		current state from which this FSM is transitioning
++ * @nxt_state		next state to which this FSM is transitioning
++ * @rollback		this is a rollback, so we're not stopping for anything
++ * @resuming		true if this FSM is resuming from a deferred state
++ * @completed		true if the state change has completed
++ * @has_paused		true if the FSM should stop after this transition completes
++ * @mode		mode to run the callback for this FSM (see enum jesd204_state_op_mode)
++ * @per_device_ran	list of JESD204 device IDs to mark when a device's
++ *			callback was ran, when running ops per device/not per-link
++ */
++struct jesd204_fsm_data {
++	struct jesd204_dev_top		*jdev_top;
++	int				link_idx;
++	jesd204_fsm_cb			fsm_change_cb;
++	jesd204_fsm_done_cb		fsm_complete_cb;
++	void				*cb_data;
++	enum jesd204_dev_state		cur_state;
++	enum jesd204_dev_state		nxt_state;
++	bool				rollback;
++	bool				resuming;
++	bool				completed;
++	bool				has_paused;
++	enum jesd204_state_op_mode	mode;
++	bool				*per_device_ran;
++};
++
++static int jesd204_fsm_handle_con_cb(struct jesd204_dev *jdev,
++				     struct jesd204_dev_con_out *con,
++				     unsigned int link_idx,
++				     struct jesd204_fsm_data *fsm_data);
++
++static int jesd204_fsm_handle_con(struct jesd204_dev *jdev,
++				  struct jesd204_dev_con_out *con,
++				  struct jesd204_fsm_data *fsm_data);
++
++/**
++ * struct jesd204_fsm_table_entry - JESD204 link states table entry
++ * @state		target JESD204 state
++ * @op			callback ID associated with transitioning to @state
++ * @first		marker for the first state in the transition series (when iterating backward)
++ * @last		marker for the last state in the transition series (when iterating forward)
++ * @post_hook		hook to be run for this state, in the done_cb part
++ */
++struct jesd204_fsm_table_entry {
++	enum jesd204_dev_state	state;
++	enum jesd204_dev_op	op;
++	bool			first;
++	bool			last;
++	jesd204_fsm_done_cb	post_hook;
++};
++
++/**
++ * struct jesd204_fsm_table_entry_iter - JESD204 table state iterator
++ * @table		current entry in a state table
++ */
++struct jesd204_fsm_table_entry_iter {
++	const struct jesd204_fsm_table_entry	*table;
++};
++
++#define JESD204_STATE_NOP(x)					\
++{								\
++	.state = JESD204_STATE_##x,				\
++	.first = true,						\
++}
++
++#define _JESD204_STATE_OP(x, _last, _post_hook)			\
++{								\
++	.state = JESD204_STATE_##x,				\
++	.op = JESD204_OP_##x,					\
++	.last = _last,						\
++	.post_hook = _post_hook,				\
++}
++#define JESD204_STATE_OP(x)				_JESD204_STATE_OP(x, false, NULL)
++#define JESD204_STATE_OP_WITH_POST_HOOK(x, _hook)	_JESD204_STATE_OP(x, false, _hook)
++#define JESD204_STATE_OP_LAST(x)			_JESD204_STATE_OP(x, true, NULL)
++
++static int jesd204_fsm_table(struct jesd204_dev *jdev,
++			     unsigned int link_idx,
++			     enum jesd204_dev_state init_state,
++			     const struct jesd204_fsm_table_entry *table,
++			     bool rollback,
++			     bool resuming,
++			     bool handle_busy_flags);
++
++static int jesd204_fsm_init_link(struct jesd204_dev *jdev,
++				 struct jesd204_fsm_data *fsm_data);
++
++static void __jesd204_fsm_clear_errors(struct jesd204_dev *jdev,
++				       unsigned int link_idx,
++				       bool handle_busy_flags);
++
++/* States to transition to start a JESD204 link */
++static const struct jesd204_fsm_table_entry jesd204_start_links_states[] = {
++	JESD204_STATE_NOP(IDLE),
++	JESD204_STATE_OP(DEVICE_INIT),
++	JESD204_STATE_OP_WITH_POST_HOOK(LINK_INIT, jesd204_fsm_init_link),
++	JESD204_STATE_OP(LINK_SUPPORTED),
++	JESD204_STATE_OP(LINK_PRE_SETUP),
++	JESD204_STATE_OP(CLK_SYNC_STAGE1),
++	JESD204_STATE_OP(CLK_SYNC_STAGE2),
++	JESD204_STATE_OP(CLK_SYNC_STAGE3),
++	JESD204_STATE_OP(LINK_SETUP),
++	JESD204_STATE_OP(OPT_SETUP_STAGE1),
++	JESD204_STATE_OP(OPT_SETUP_STAGE2),
++	JESD204_STATE_OP(OPT_SETUP_STAGE3),
++	JESD204_STATE_OP(OPT_SETUP_STAGE4),
++	JESD204_STATE_OP(OPT_SETUP_STAGE5),
++	JESD204_STATE_OP(CLOCKS_ENABLE),
++	JESD204_STATE_OP(LINK_ENABLE),
++	JESD204_STATE_OP(LINK_RUNNING),
++	JESD204_STATE_OP_LAST(OPT_POST_RUNNING_STAGE),
++};
++
++const char *jesd204_state_str(enum jesd204_dev_state state)
++{
++	switch (state) {
++	case JESD204_STATE_UNINIT:
++		return "uninitialized";
++	case JESD204_STATE_INITIALIZED:
++		return "initialized";
++	case JESD204_STATE_PROBED:
++		return "probed";
++	case JESD204_STATE_IDLE:
++		return "idle";
++	case JESD204_STATE_DEVICE_INIT:
++		return "device_init";
++	case JESD204_STATE_LINK_INIT:
++		return "link_init";
++	case JESD204_STATE_LINK_SUPPORTED:
++		return "link_supported";
++	case JESD204_STATE_LINK_PRE_SETUP:
++		return "link_pre_setup";
++	case JESD204_STATE_CLK_SYNC_STAGE1:
++		return "clk_sync_stage1";
++	case JESD204_STATE_CLK_SYNC_STAGE2:
++		return "clk_sync_stage2";
++	case JESD204_STATE_CLK_SYNC_STAGE3:
++		return "clk_sync_stage3";
++	case JESD204_STATE_LINK_SETUP:
++		return "link_setup";
++	case JESD204_STATE_CLOCKS_ENABLE:
++		return "clocks_enable";
++	case JESD204_STATE_LINK_ENABLE:
++		return "link_enable";
++	case JESD204_STATE_LINK_RUNNING:
++		return "link_running";
++	case JESD204_STATE_OPT_SETUP_STAGE1:
++		return "opt_setup_stage1";
++	case JESD204_STATE_OPT_SETUP_STAGE2:
++		return "opt_setup_stage2";
++	case JESD204_STATE_OPT_SETUP_STAGE3:
++		return "opt_setup_stage3";
++	case JESD204_STATE_OPT_SETUP_STAGE4:
++		return "opt_setup_stage4";
++	case JESD204_STATE_OPT_SETUP_STAGE5:
++		return "opt_setup_stage5";
++	case JESD204_STATE_OPT_POST_RUNNING_STAGE:
++		return "opt_post_running_stage";
++	case JESD204_STATE_DONT_CARE:
++		return "dont_care";
++	default:
++		return "<unknown>";
++	}
++}
++
++static int jesd204_con_link_idx_in_jdev_top(struct jesd204_dev_con_out *con,
++					    struct jesd204_dev_top *jdev_top)
++{
++	int i;
++
++	if (con->topo_id != jdev_top->topo_id)
++		return -EINVAL;
++
++	for (i = 0; i < jdev_top->num_links; i++) {
++		if (jdev_top->link_ids[i] == con->link_id)
++			return i;
++	}
++
++	return -EINVAL;
++}
++
++static int jesd204_dev_set_error(struct jesd204_dev *jdev,
++				 struct jesd204_link_opaque *ol,
++				 struct jesd204_dev_con_out *con,
++				 int err)
++{
++	/* FIXME: should we exit here? */
++	if (err == 0)
++		return 0;
++
++	if (con)
++		con->error = err;
++
++	ol->link.error = err;
++
++	return err;
++}
++
++static int jesd204_fsm_propagate_cb_inputs(struct jesd204_dev *jdev_it,
++					   struct jesd204_fsm_data *data)
++{
++	struct jesd204_dev_con_out *con;
++	int i, ret = 0;
++
++	for (i = 0; i < jdev_it->inputs_count; i++) {
++		con = jdev_it->inputs[i];
++
++		ret = jesd204_fsm_propagate_cb_inputs(con->owner, data);
++		if (ret)
++			break;
++		ret = jesd204_fsm_handle_con(con->owner, con, data);
++		if (ret)
++			break;
++	}
++
++	return ret;
++}
++
++static int jesd204_fsm_propagate_rollback_cb_inputs(struct jesd204_dev *jdev_it,
++						    struct jesd204_fsm_data *data)
++{
++	struct jesd204_dev_con_out *con;
++	int i;
++
++	if (jdev_it->inputs_count == 0)
++		return 0;
++
++	for (i = jdev_it->inputs_count - 1; i >= 0; i--) {
++		con = jdev_it->inputs[i];
++
++		jesd204_fsm_handle_con(con->owner, con, data);
++		jesd204_fsm_propagate_rollback_cb_inputs(con->owner, data);
++	}
++
++	return 0;
++}
++
++static int jesd204_fsm_propagate_cb_outputs(struct jesd204_dev *jdev_it,
++					    struct jesd204_fsm_data *data)
++{
++	struct jesd204_dev_con_out *con;
++	struct jesd204_dev_list_entry *e;
++	int ret = 0;
++
++	list_for_each_entry(con, &jdev_it->outputs, entry) {
++		list_for_each_entry(e, &con->dests, entry) {
++			ret = jesd204_fsm_handle_con(e->jdev, con, data);
++			if (ret)
++				goto done;
++			ret = jesd204_fsm_propagate_cb_outputs(e->jdev, data);
++			if (ret)
++				goto done;
++		}
++	}
++
++done:
++	return ret;
++}
++
++static int jesd204_fsm_propagate_rollback_cb_outputs(struct jesd204_dev *jdev_it,
++						     struct jesd204_fsm_data *data)
++{
++	struct jesd204_dev_con_out *con;
++	struct jesd204_dev_list_entry *e;
++
++	list_for_each_entry_reverse(con, &jdev_it->outputs, entry) {
++		list_for_each_entry_reverse(e, &con->dests, entry) {
++			jesd204_fsm_propagate_rollback_cb_outputs(e->jdev, data);
++			jesd204_fsm_handle_con(e->jdev, con, data);
++		}
++	}
++
++	return 0;
++}
++
++static int jesd204_fsm_propagate_cb_top_level(struct jesd204_dev *jdev_it,
++					      struct jesd204_fsm_data *fsm_data)
++{
++	int i, ret;
++
++	if (fsm_data->link_idx != JESD204_LINKS_ALL)
++		return jesd204_fsm_handle_con_cb(jdev_it, NULL,
++						 fsm_data->link_idx,
++						 fsm_data);
++
++	for (i = 0; i < fsm_data->jdev_top->num_links; i++) {
++		ret = jesd204_fsm_handle_con_cb(jdev_it, NULL, i, fsm_data);
++		if (ret)
++			break;
++	}
++	/* FIXME: error message here? */
++
++	return ret;
++}
++
++static int jesd204_fsm_propagate_rollback_cb_top_level(struct jesd204_dev *jdev_it,
++						       struct jesd204_fsm_data *fsm_data)
++{
++	int i;
++
++	if (fsm_data->link_idx != JESD204_LINKS_ALL) {
++		jesd204_fsm_handle_con_cb(jdev_it, NULL, fsm_data->link_idx,
++					   fsm_data);
++		return 0;
++	}
++
++	for (i = fsm_data->jdev_top->num_links - 1; i >= 0; i--)
++		jesd204_fsm_handle_con_cb(jdev_it, NULL, i, fsm_data);
++
++	return 0;
++}
++
++static int __jesd204_fsm_propagate_cb(struct jesd204_dev *jdev,
++				      struct jesd204_fsm_data *data)
++{
++	int ret;
++
++	ret = jesd204_fsm_propagate_cb_inputs(jdev, data);
++	if (ret)
++		return ret;
++
++	ret = jesd204_fsm_propagate_cb_outputs(jdev, data);
++	if (ret)
++		return ret;
++
++	return jesd204_fsm_propagate_cb_top_level(jdev, data);
++}
++
++static int __jesd204_fsm_propagate_rollback_cb(struct jesd204_dev *jdev,
++					       struct jesd204_fsm_data *data)
++{
++	jesd204_fsm_propagate_rollback_cb_top_level(jdev, data);
++	jesd204_fsm_propagate_rollback_cb_outputs(jdev, data);
++	jesd204_fsm_propagate_rollback_cb_inputs(jdev, data);
++
++	return 0;
++}
++
++static int jesd204_fsm_propagate_cb(struct jesd204_dev *jdev,
++				    struct jesd204_fsm_data *data)
++{
++	int cnt = jesd204_device_count_get();
++	int ret;
++
++	/**
++	 * Always alocate this, we may never know which devices want
++	 * to run per_device & which per_link
++	 */
++	data->per_device_ran = kcalloc(cnt, sizeof(bool), GFP_KERNEL);
++	if (!data->per_device_ran)
++		return -ENOMEM;
++
++	if (data->rollback)
++		ret = __jesd204_fsm_propagate_rollback_cb(jdev, data);
++	else
++		ret = __jesd204_fsm_propagate_cb(jdev, data);
++
++	kfree(data->per_device_ran);
++	data->per_device_ran = NULL;
++	return ret;
++}
++
++static int __jesd204_link_fsm_update_state(struct jesd204_dev *jdev,
++					   struct jesd204_link_opaque *ol,
++					   struct jesd204_fsm_data *fsm_data)
++{
++	bool exit_on_error = true;
++
++	ol->fsm_data = NULL;
++
++	if (fsm_data->cur_state == JESD204_STATE_DONT_CARE)
++		exit_on_error = false;
++
++	if (fsm_data->rollback)
++		exit_on_error = false;
++
++	if (exit_on_error && ol->link.error) {
++		jesd204_err(jdev, "jesd got error from topology %d\n",
++			    ol->link.error);
++		return ol->link.error;
++	}
++
++	if (fsm_data->cur_state != JESD204_STATE_DONT_CARE &&
++	    fsm_data->nxt_state != JESD204_STATE_DONT_CARE)
++		jesd204_info(jdev, "JESD204[%u:%u] transition %s -> %s\n",
++			     jesd204_dev_top_dev(jdev)->topo_id, ol->link.link_id,
++			     jesd204_state_str(fsm_data->cur_state),
++			     jesd204_state_str(fsm_data->nxt_state));
++
++	if (fsm_data->nxt_state != JESD204_STATE_DONT_CARE)
++		ol->state = fsm_data->nxt_state;
++
++	fsm_data->completed = true;
++
++	return 0;
++}
++
++static void __jesd204_link_fsm_done_cb(struct kref *ref)
++{
++	struct jesd204_link_opaque *ol =
++		container_of(ref, typeof(*ol), cb_ref);
++	struct jesd204_dev *jdev = &ol->jdev_top->jdev;
++	struct jesd204_fsm_data *fsm_data = ol->fsm_data;
++	int ret;
++
++	ret = __jesd204_link_fsm_update_state(jdev, ol, fsm_data);
++	if (ret)
++		goto out;
++
++	if (!fsm_data->fsm_complete_cb)
++		goto out;
++
++	ret = fsm_data->fsm_complete_cb(jdev, fsm_data);
++	if (ret == 0)
++		goto out;
++
++	if (fsm_data->rollback)
++		goto out;
++
++	jesd204_dev_set_error(jdev, ol, NULL, ret);
++
++out:
++	ol->fsm_data = NULL;
++}
++
++static void __jesd204_all_links_fsm_done_cb(struct kref *ref)
++{
++	struct jesd204_dev_top *jdev_top =
++		container_of(ref, typeof(*jdev_top), cb_ref);
++	struct jesd204_dev *jdev = &jdev_top->jdev;
++	struct jesd204_fsm_data *fsm_data = jdev_top->fsm_data;
++	struct jesd204_link_opaque *ol;
++	int link_idx;
++	int ret;
++
++	if (fsm_data->rollback) {
++		for (link_idx = jdev_top->num_links - 1; link_idx >= 0; link_idx--) {
++			ol = &jdev_top->active_links[link_idx];
++			__jesd204_link_fsm_update_state(jdev, ol, fsm_data);
++		}
++	} else {
++		for (link_idx = 0; link_idx < jdev_top->num_links; link_idx++) {
++			ol = &jdev_top->active_links[link_idx];
++			ret = __jesd204_link_fsm_update_state(jdev, ol, fsm_data);
++			if (ret)
++				goto out;
++		}
++	}
++
++	if (!fsm_data->fsm_complete_cb)
++		goto out;
++
++	ret = fsm_data->fsm_complete_cb(jdev, fsm_data);
++	if (ret == 0)
++		goto out;
++
++	if (fsm_data->rollback)
++		goto out;
++
++	for (link_idx = 0; link_idx < jdev_top->num_links; link_idx++) {
++		ol = &jdev_top->active_links[link_idx];
++		jesd204_dev_set_error(jdev, ol, NULL, ret);
++	}
++out:
++	jdev_top->fsm_data = NULL;
++}
++
++static void __jesd204_fsm_kref_link_put_get(struct jesd204_dev_top *jdev_top,
++					    unsigned int link_idx,
++					    bool put)
++{
++	struct kref *kref;
++
++	if (link_idx != JESD204_LINKS_ALL) {
++		kref = &jdev_top->active_links[link_idx].cb_ref;
++		if (put)
++			kref_put(kref, __jesd204_link_fsm_done_cb);
++		else
++			kref_get(kref);
++		return;
++	}
++
++	kref = &jdev_top->cb_ref;
++	if (put)
++		kref_put(kref, __jesd204_all_links_fsm_done_cb);
++	else
++		kref_get(kref);
++}
++
++static void jesd204_fsm_kref_link_get(struct jesd204_dev_top *jdev_top,
++				      unsigned int link_idx)
++{
++	__jesd204_fsm_kref_link_put_get(jdev_top, link_idx, false);
++}
++
++static void jesd204_fsm_kref_link_put(struct jesd204_dev_top *jdev_top,
++				      unsigned int link_idx)
++{
++	__jesd204_fsm_kref_link_put_get(jdev_top, link_idx, true);
++}
++
++static int jesd204_con_validate_cur_state(struct jesd204_dev *jdev,
++					  struct jesd204_dev_con_out *c,
++					  struct jesd204_fsm_data *fsm_data)
++{
++	struct jesd204_link_opaque *ol;
++
++	if (fsm_data->cur_state == JESD204_STATE_DONT_CARE)
++		return 0;
++
++	if (fsm_data->rollback)
++		return 0;
++
++	if (c->state == fsm_data->nxt_state)
++		return 0;
++
++	if (c->link_idx == JESD204_LINKS_ALL) {
++		if (!fsm_data->jdev_top->initialized)
++			return 0;
++		jesd204_err(jdev, "Uninitialized connection in topology\n");
++		return -EINVAL;
++	}
++
++	if (fsm_data->cur_state != c->state) {
++		ol = &fsm_data->jdev_top->active_links[c->link_idx];
++		jesd204_warn(jdev,
++			 "JESD204[%d] invalid con[%u] state: %s, exp: %s, nxt: %s\n",
++			 c->link_id,
++			 c->id,
++			 jesd204_state_str(c->state),
++			 jesd204_state_str(fsm_data->cur_state),
++			 jesd204_state_str(fsm_data->nxt_state));
++		return jesd204_dev_set_error(jdev, ol, c, -EINVAL);
++	}
++
++	return 0;
++}
++
++static int jesd204_fsm_handle_con_cb(struct jesd204_dev *jdev_it,
++				     struct jesd204_dev_con_out *con,
++				     unsigned int link_idx,
++				     struct jesd204_fsm_data *fsm_data)
++{
++	struct jesd204_dev_top *jdev_top = fsm_data->jdev_top;
++	struct jesd204_link_opaque *ol;
++	int ret;
++
++	jesd204_fsm_kref_link_get(jdev_top, fsm_data->link_idx);
++
++	if (fsm_data->mode == JESD204_STATE_OP_MODE_PER_DEVICE) {
++		if (fsm_data->per_device_ran[jdev_it->id])
++			goto out;
++
++		fsm_data->per_device_ran[jdev_it->id] = true;
++	}
++
++	ret = fsm_data->fsm_change_cb(jdev_it, con, link_idx, fsm_data);
++
++	/**
++	 * Rollbacks trump everything, we don't return any errors
++	 */
++	if (fsm_data->rollback)
++		goto out;
++
++	if (ret < 0) {
++		ol = &jdev_top->active_links[link_idx];
++		jesd204_err(jdev_it,
++			    "JESD204[%u:%u] In %s got error from cb: %d%s\n",
++			    jdev_top->topo_id, ol->link.link_id,
++			    jesd204_state_str(fsm_data->nxt_state), ret,
++			    ol->fsm_ignore_errors ? " (ignoring!)" : "");
++
++		if (ol->fsm_ignore_errors)
++			ret = JESD204_STATE_CHANGE_DONE;
++		else
++			return jesd204_dev_set_error(jdev_it, ol, con, ret);
++	}
++
++	if (ret != JESD204_STATE_CHANGE_DONE)
++		return ret;
++
++out:
++	if (con && fsm_data->nxt_state != JESD204_STATE_DONT_CARE)
++		con->state = fsm_data->nxt_state;
++
++	jesd204_fsm_kref_link_put(jdev_top, fsm_data->link_idx);
++	return 0;
++}
++
++static int jesd204_fsm_handle_con(struct jesd204_dev *jdev_it,
++				  struct jesd204_dev_con_out *con,
++				  struct jesd204_fsm_data *fsm_data)
++{
++	struct jesd204_dev_top *jdev_top;
++	unsigned int link_idx;
++	int ret;
++
++	if (!fsm_data->fsm_change_cb)
++		return 0;
++
++	/* if this transitioned already, we're done */
++	if (con->state == fsm_data->nxt_state)
++		return 0;
++
++	ret = jesd204_con_validate_cur_state(jdev_it, con, fsm_data);
++	if (ret)
++		return ret;
++
++	if (fsm_data->link_idx != JESD204_LINKS_ALL &&
++	    fsm_data->link_idx != con->link_idx)
++		return 0;
++
++	if (con->link_idx != JESD204_LINKS_ALL)
++		return jesd204_fsm_handle_con_cb(jdev_it, con, con->link_idx,
++						 fsm_data);
++
++	jdev_top = fsm_data->jdev_top;
++
++	if (jdev_top->initialized)
++		return 0;
++
++	/**
++	 * At this point, the connections don't have initialized link indexes
++	 * so they don't know to which JESD204 link they belong to.
++	 * So, we initialize then here; this is a special case,
++	 * we are running jesd204_dev_initialize_cb()
++	 */
++	for (link_idx = 0; link_idx < jdev_top->num_links; link_idx++) {
++		ret = jesd204_fsm_handle_con_cb(jdev_it, con, link_idx, fsm_data);
++		if (ret < 0)
++			return ret;
++	}
++
++	return 0;
++}
++
++static void jesd204_fsm_link_init(struct jesd204_dev_top *jdev_top,
++				  struct jesd204_fsm_data *fsm_data)
++{
++	unsigned int link_idx = fsm_data->link_idx;
++	struct jesd204_link_opaque *ol;
++
++	if (link_idx != JESD204_LINKS_ALL) {
++		ol = &jdev_top->active_links[link_idx];
++		ol->fsm_data = fsm_data;
++		kref_init(&ol->cb_ref);
++		return;
++	}
++
++	kref_init(&jdev_top->cb_ref);
++	jdev_top->fsm_data = fsm_data;
++}
++
++static int jesd204_fsm_test_and_set_busy(struct jesd204_dev_top *jdev_top,
++					 enum jesd204_dev_state cur_state,
++					 unsigned int link_idx)
++{
++	struct jesd204_dev *jdev = &jdev_top->jdev;
++	struct jesd204_link_opaque *ol;
++
++	if (link_idx != JESD204_LINKS_ALL) {
++		ol = &jdev_top->active_links[link_idx];
++		if (test_and_set_bit(JESD204_FSM_BUSY, &ol->flags)) {
++			jesd204_err(jdev, "JESD204[%u:%u]: FSM is busy\n",
++				    jdev_top->topo_id, ol->link.link_id);
++			return -EBUSY;
++		}
++		return 0;
++	}
++
++	for (link_idx = 0; link_idx < jdev_top->num_links; link_idx++) {
++		ol = &jdev_top->active_links[link_idx];
++		if (test_and_set_bit(JESD204_FSM_BUSY, &ol->flags)) {
++			jesd204_err(jdev, "JESD204[%u:%u]: FSM is busy\n",
++				    jdev_top->topo_id, ol->link.link_id);
++			goto err_unwind_busy;
++		}
++	}
++
++	return 0;
++
++err_unwind_busy:
++	for (; link_idx != JESD204_LINKS_ALL; link_idx--) {
++		ol = &jdev_top->active_links[link_idx];
++		clear_bit(JESD204_FSM_BUSY, &ol->flags);
++	}
++
++	return -EBUSY;
++}
++
++static void jesd204_fsm_clear_busy(struct jesd204_dev_top *jdev_top,
++				   int link_idx)
++{
++	struct jesd204_link_opaque *ol;
++
++	if (link_idx != JESD204_LINKS_ALL) {
++		ol = &jdev_top->active_links[link_idx];
++		clear_bit(JESD204_FSM_BUSY, &ol->flags);
++		return;
++	}
++
++	for (link_idx = 0; link_idx < jdev_top->num_links; link_idx++) {
++		ol = &jdev_top->active_links[link_idx];
++		clear_bit(JESD204_FSM_BUSY, &ol->flags);
++	}
++}
++
++static int jesd204_validate_lnk_state(struct jesd204_dev *jdev,
++				      struct jesd204_link_opaque *ol,
++				      struct jesd204_fsm_data *fsm_data)
++{
++	enum jesd204_dev_state cur_state = fsm_data->cur_state;
++	enum jesd204_dev_state nxt_state = fsm_data->nxt_state;
++
++	if (cur_state == JESD204_STATE_DONT_CARE)
++		return 0;
++
++	if (cur_state == ol->state)
++		return 0;
++
++	/* When rolling back we need to validate this, to not skip the first state (in a rollback) */
++	if (fsm_data->rollback && nxt_state == ol->state)
++		return 0;
++
++	if (fsm_data->rollback || fsm_data->resuming)
++		return -EINVALID_STATE;
++
++	jesd204_warn(jdev,
++		 "JESD204[%u:%u] invalid link state: %s, exp: %s, nxt: %s\n",
++		 jesd204_dev_top_dev(jdev)->topo_id, ol->link.link_id,
++		 jesd204_state_str(ol->state),
++		 jesd204_state_str(cur_state),
++		 jesd204_state_str(nxt_state));
++
++	return jesd204_dev_set_error(jdev, ol, NULL, -EINVAL);
++}
++
++static int jesd204_validate_resuming_state(struct jesd204_dev *jdev,
++					   struct jesd204_link_opaque *ol,
++					   struct jesd204_fsm_data *fsm_data)
++{
++	enum jesd204_dev_state cur_state = fsm_data->cur_state;
++	bool resuming = fsm_data->resuming;
++
++	if (cur_state == JESD204_STATE_DONT_CARE)
++		return 0;
++
++	if (ol->fsm_paused && !resuming) {
++		jesd204_warn(jdev, "JESD204[%u:%u] FSM is paused; a resume is required\n",
++			     jesd204_dev_top_dev(jdev)->topo_id, ol->link.link_id);
++		return -EINVAL;
++	}
++
++	if (!ol->fsm_paused && resuming) {
++		jesd204_warn(jdev, "JESD204[%u:%u] FSM is NOT paused; a transition is required\n",
++			     jesd204_dev_top_dev(jdev)->topo_id, ol->link.link_id);
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int jesd204_validate_fsm_data(struct jesd204_dev *jdev,
++				     struct jesd204_fsm_data *fsm_data)
++{
++	struct jesd204_dev_top *jdev_top = fsm_data->jdev_top;
++	unsigned int link_idx = fsm_data->link_idx;
++	struct jesd204_link_opaque *ol;
++	int ret;
++
++	if (link_idx != JESD204_LINKS_ALL) {
++		ol = &jdev_top->active_links[link_idx];
++
++		ret = jesd204_validate_resuming_state(jdev, ol, fsm_data);
++		if (ret)
++			return ret;
++
++		return jesd204_validate_lnk_state(jdev, ol, fsm_data);
++	}
++
++	for (link_idx = 0; link_idx < jdev_top->num_links; link_idx++) {
++		ol = &jdev_top->active_links[link_idx];
++
++		ret = jesd204_validate_resuming_state(jdev, ol, fsm_data);
++		if (ret)
++			return ret;
++
++		ret = jesd204_validate_lnk_state(jdev, ol, fsm_data);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int __jesd204_fsm(struct jesd204_dev *jdev,
++			 struct jesd204_dev_top *jdev_top,
++			 struct jesd204_fsm_data *data,
++			 bool handle_busy_flags)
++{
++	int ret;
++
++	data->jdev_top = jdev_top;
++
++	if (handle_busy_flags) {
++		ret = jesd204_fsm_test_and_set_busy(jdev_top, data->cur_state,
++						    data->link_idx);
++		if (ret)
++			return ret;
++	}
++
++	ret = jesd204_validate_fsm_data(jdev, data);
++	if (ret)
++		goto out_clear_busy;
++
++	jesd204_fsm_link_init(jdev_top, data);
++
++	/**
++	 * Always propagate from the top-level device, otherwise if
++	 * if we propagate from a device that is somewhere in a topology
++	 * and belongs to a certain JESD204 link, we may miss certain
++	 * devices when propagating changes for all JESD204 links
++	 */
++	ret = jesd204_fsm_propagate_cb(&jdev_top->jdev, data);
++	if (ret)
++		goto out_clear_busy;
++
++	jesd204_fsm_kref_link_put(data->jdev_top, data->link_idx);
++
++out_clear_busy:
++	if (handle_busy_flags)
++		jesd204_fsm_clear_busy(jdev_top, data->link_idx);
++
++	return ret;
++}
++
++static int jesd204_fsm(struct jesd204_dev *jdev,
++		       struct jesd204_fsm_data *data,
++		       bool handle_busy_flags)
++{
++	struct jesd204_dev_top *jdev_top = jesd204_dev_get_topology_top_dev(jdev);
++
++	if (!jdev_top)
++		return -EFAULT;
++
++	return __jesd204_fsm(jdev, jdev_top, data, handle_busy_flags);
++}
++
++static int jesd204_dev_initialize_cb(struct jesd204_dev *jdev,
++				     struct jesd204_dev_con_out *con,
++				     unsigned int link_idx,
++				     struct jesd204_fsm_data *fsm_data)
++{
++	int ret;
++
++	if (fsm_data->jdev_top->initialized) {
++		jesd204_err(jdev, "top-level device already initialized\n");
++		return -EINVAL;
++	}
++
++	if (!con)
++		return JESD204_STATE_CHANGE_DONE;
++
++	ret = jesd204_con_link_idx_in_jdev_top(con, fsm_data->jdev_top);
++	if (ret < 0)
++		return JESD204_STATE_CHANGE_DEFER;
++
++	con->jdev_top = fsm_data->jdev_top;
++	con->link_idx = ret;
++
++	return JESD204_STATE_CHANGE_DONE;
++}
++
++int jesd204_init_topology(struct jesd204_dev_top *jdev_top)
++{
++	struct jesd204_fsm_data data;
++	int ret;
++
++	if (!jdev_top)
++		return -EINVAL;
++
++	memset(&data, 0, sizeof(data));
++	data.cur_state = JESD204_STATE_UNINIT;
++	data.nxt_state = JESD204_STATE_INITIALIZED;
++	data.fsm_change_cb = jesd204_dev_initialize_cb;
++	data.cb_data = jdev_top;
++	data.link_idx = JESD204_LINKS_ALL;
++
++	ret = jesd204_fsm(&jdev_top->jdev, &data, true);
++	if (ret)
++		return ret;
++
++	jdev_top->initialized = true;
++
++	return 0;
++}
++
++static int jesd204_fsm_init_link(struct jesd204_dev *jdev,
++				 struct jesd204_fsm_data *fsm_data)
++{
++	struct jesd204_dev_top *jdev_top = jesd204_dev_top_dev(jdev);
++
++	if (!jdev_top || fsm_data->rollback)
++		return 0;
++
++	return jesd204_dev_init_link_data(jdev_top, fsm_data->link_idx);
++}
++
++static int jesd204_fsm_start_link(struct jesd204_dev *jdev,
++				  unsigned int link_idx,
++				  enum jesd204_dev_state init_state,
++				  bool resuming,
++				  bool handle_busy_flags)
++{
++	return jesd204_fsm_table(jdev, link_idx, init_state,
++				 jesd204_start_links_states,
++				 false, resuming, handle_busy_flags);
++}
++
++static int jesd204_init_secondary_sysref_cb(struct jesd204_dev *jdev,
++				  struct jesd204_dev_top *jdev_top)
++{
++	if (!jdev->is_sec_sysref_provider)
++		return 0;
++
++	if (!jdev->dev_data->sysref_cb) {
++		jesd204_err(jdev, "Configured as SYSREF, but no SYSREF cb\n");
++		return -EINVAL;
++	}
++
++	/**
++	 * For multi-link devices, we get here the number of links.
++	 * FIXME: would it make sense to re-use the per_device_ran[] logic?
++	 */
++	if (jdev_top->jdev_sysref_sec && (jdev_top->jdev_sysref_sec != jdev)) {
++		jesd204_err(jdev, "Duplicate SYSREF for topology %pOF\n",
++			    jdev_top->jdev.np);
++		jesd204_err(jdev, "Previously set SYSREF is %pOF\n",
++			    jdev_top->jdev_sysref_sec->np);
++		return -EEXIST;
++	}
++
++	if (jdev_top->jdev_sysref_sec)
++		return 0;
++
++	jesd204_info(jdev, "Using as sec SYSREF provider\n");
++	jdev_top->jdev_sysref_sec = jdev;
++
++	return 0;
++}
++
++static int jesd204_init_sysref_cb(struct jesd204_dev *jdev,
++				  struct jesd204_dev_top *jdev_top)
++{
++	if (!jdev->is_sysref_provider)
++		return jesd204_init_secondary_sysref_cb(jdev, jdev_top);
++
++	if (!jdev->dev_data->sysref_cb) {
++		jesd204_err(jdev, "Configured as SYSREF, but no SYSREF cb\n");
++		return -EINVAL;
++	}
++
++	/**
++	 * For multi-link devices, we get here the number of links.
++	 * FIXME: would it make sense to re-use the per_device_ran[] logic?
++	 */
++	if (jdev_top->jdev_sysref && (jdev_top->jdev_sysref != jdev)) {
++		jesd204_err(jdev, "Duplicate SYSREF for topology %pOF\n",
++			    jdev_top->jdev.np);
++		jesd204_err(jdev, "Previously set SYSREF is %pOF\n",
++			    jdev_top->jdev_sysref->np);
++		return -EEXIST;
++	}
++
++	if (jdev_top->jdev_sysref)
++		return 0;
++
++	jesd204_info(jdev, "Using as SYSREF provider\n");
++	jdev_top->jdev_sysref = jdev;
++
++	return 0;
++}
++
++static int jesd204_fsm_probed_cb(struct jesd204_dev *jdev,
++				 struct jesd204_dev_con_out *con,
++				 unsigned int link_idx,
++				 struct jesd204_fsm_data *fsm_data)
++{
++	int ret;
++
++	if (!jdev->fsm_inited)
++		return JESD204_STATE_CHANGE_DEFER;
++
++	ret = jesd204_init_sysref_cb(jdev, fsm_data->jdev_top);
++	if (ret)
++		return ret;
++
++	return JESD204_STATE_CHANGE_DONE;
++}
++
++static int jesd204_fsm_probe_done(struct jesd204_dev *jdev,
++				  struct jesd204_fsm_data *fsm_data)
++{
++	return jesd204_fsm_start_link(jdev, fsm_data->link_idx,
++				      JESD204_STATE_PROBED, false, false);
++}
++
++static int jesd204_fsm_start_from_probe(struct jesd204_dev *jdev,
++					unsigned int link_idx)
++{
++	struct jesd204_fsm_data data;
++	int ret;
++
++	jdev->fsm_inited = true;
++
++	memset(&data, 0, sizeof(data));
++	data.cur_state = JESD204_STATE_INITIALIZED;
++	data.nxt_state = JESD204_STATE_PROBED;
++	data.fsm_change_cb = jesd204_fsm_probed_cb;
++	data.fsm_complete_cb = jesd204_fsm_probe_done;
++	data.link_idx = link_idx;
++
++	ret = jesd204_fsm(jdev, &data, true);
++	if (ret)
++		jdev->fsm_inited = false;
++
++	return ret;
++}
++
++static int __jesd204_fsm_start(struct jesd204_dev *jdev, unsigned int link_idx,
++			       bool resuming)
++{
++	if (!jdev)
++		return 0;
++
++	if (IS_ERR(jdev))
++		return PTR_ERR(jdev);
++
++	if (!jdev->fsm_inited)
++		return jesd204_fsm_start_from_probe(jdev, link_idx);
++
++	return jesd204_fsm_start_link(jdev, link_idx,
++				      JESD204_STATE_IDLE, resuming, true);
++}
++
++int jesd204_fsm_start(struct jesd204_dev *jdev, unsigned int link_idx)
++{
++	return __jesd204_fsm_start(jdev, link_idx, false);
++}
++EXPORT_SYMBOL_GPL(jesd204_fsm_start);
++
++int jesd204_fsm_resume(struct jesd204_dev *jdev, unsigned int link_idx)
++{
++	return __jesd204_fsm_start(jdev, link_idx, true);
++}
++EXPORT_SYMBOL_GPL(jesd204_fsm_resume);
++
++static void jesd204_fsm_handle_stop_state(struct jesd204_dev *jdev,
++					  unsigned int link_idx,
++					  struct jesd204_fsm_data *fsm_data)
++{
++	struct jesd204_fsm_table_entry_iter *it = fsm_data->cb_data;
++	int state_idx;
++
++	if (fsm_data->rollback)
++		return;
++
++	/* FSM states from DT start at offset 100 */
++	state_idx = it->table[0].state - JESD204_STATE_FSM_OFFSET;
++	if (state_idx < 0 || state_idx >= JESD204_FSM_STATES_NUM)
++		return;
++
++	/* FIXME: maybe add support for stopping per-link? */
++	if (!jdev->stop_states[state_idx])
++		return;
++
++	fsm_data->has_paused = true;
++}
++
++static int jesd204_fsm_table_entry_cb(struct jesd204_dev *jdev,
++				      struct jesd204_dev_con_out *con,
++				      unsigned int link_idx,
++				      struct jesd204_fsm_data *fsm_data)
++{
++	struct jesd204_fsm_table_entry_iter *it = fsm_data->cb_data;
++	const struct jesd204_state_op *state_op;
++	enum jesd204_state_op_reason reason;
++	struct jesd204_link_opaque *ol;
++
++	jesd204_fsm_handle_stop_state(jdev, link_idx, fsm_data);
++
++	if (!jdev->dev_data->state_ops)
++		return JESD204_STATE_CHANGE_DONE;
++
++	state_op = &jdev->dev_data->state_ops[it->table[0].op];
++
++	if (fsm_data->rollback)
++		reason = JESD204_STATE_OP_REASON_UNINIT;
++	else
++		reason = JESD204_STATE_OP_REASON_INIT;
++
++	switch (state_op->mode) {
++	case JESD204_STATE_OP_MODE_PER_DEVICE:
++		if (!state_op->per_device)
++			return JESD204_STATE_CHANGE_DONE;
++		if (fsm_data->per_device_ran[jdev->id])
++			return JESD204_STATE_CHANGE_DONE;
++		fsm_data->per_device_ran[jdev->id] = true;
++		return state_op->per_device(jdev, reason);
++	case JESD204_STATE_OP_MODE_PER_LINK:
++		if (!state_op->per_link)
++			return JESD204_STATE_CHANGE_DONE;
++		ol = &fsm_data->jdev_top->active_links[link_idx];
++		return state_op->per_link(jdev, reason, &ol->link);
++	default:
++		jesd204_err(jdev, "Invalid state_op mode %d\n", state_op->mode);
++		return -EINVAL;
++	}
++}
++
++static int jesd204_fsm_table_entry_done(struct jesd204_dev *jdev,
++					struct jesd204_fsm_data *fsm_data)
++{
++	struct jesd204_fsm_table_entry_iter *it = fsm_data->cb_data;
++	const struct jesd204_fsm_table_entry *table = it->table;
++	const struct jesd204_state_op *state_op;
++	int ret;
++
++	if (table[0].post_hook) {
++		ret = table[0].post_hook(jdev, fsm_data);
++		if (ret)
++			return ret;
++	}
++
++	if (!fsm_data->rollback) {
++		state_op = &jdev->dev_data->state_ops[it->table[0].op];
++		if (state_op->post_state_sysref && jesd204_dev_is_top(jdev))
++			jesd204_sysref_async(jdev);
++	}
++
++	return 0;
++}
++
++static bool jesd204_fsm_table_end(const struct jesd204_fsm_table_entry *entry,
++				  bool rollback)
++{
++	if (rollback)
++		return entry->first;
++	return entry->last;
++}
++
++static void jesd204_fsm_set_paused_state(struct jesd204_dev *jdev,
++					 struct jesd204_dev_top *jdev_top,
++					 unsigned int link_idx,
++					 const struct jesd204_fsm_table_entry *table,
++					 bool paused)
++{
++	struct jesd204_link_opaque *ol;
++
++	/* this is for displaying the correct state when resuming */
++	if (!paused && !table[0].first)
++		table--;
++
++	if (link_idx != JESD204_LINKS_ALL) {
++		ol = &jdev_top->active_links[link_idx];
++
++		if (ol->fsm_paused == paused)
++			return;
++
++		jesd204_notice(jdev, "JESD204[%u:%u] %s state %s\n",
++			       jdev_top->topo_id, ol->link.link_id,
++			       paused ? "paused at" : "resuming from",
++			       jesd204_state_str(table[0].state));
++
++		ol->fsm_paused = paused;
++		return;
++	}
++
++	for (link_idx = 0; link_idx < jdev_top->num_links; link_idx++) {
++		ol = &jdev_top->active_links[link_idx];
++
++		if (ol->fsm_paused == paused)
++			continue;
++
++		jesd204_notice(jdev, "JESD204[%u:%u] %s state %s\n",
++			       jdev_top->topo_id, ol->link.link_id,
++			       paused ? "paused at" : "resuming from",
++			       jesd204_state_str(table[0].state));
++
++		ol->fsm_paused = paused;
++	}
++}
++
++static int jesd204_fsm_table_single(struct jesd204_dev *jdev,
++				    struct jesd204_dev_top *jdev_top,
++				    struct jesd204_fsm_data *data,
++				    enum jesd204_dev_state init_state,
++				    const struct jesd204_fsm_table_entry *table,
++				    bool rollback,
++				    bool handle_busy_flags)
++{
++	struct jesd204_fsm_table_entry_iter *it = data->cb_data;
++	const struct jesd204_state_op *state_op;
++	int ret, ret1, cnt;
++
++	cnt = jesd204_device_count_get();
++
++	it->table = table;
++
++	ret1 = 0;
++	ret = 0;
++	/**
++	 * FIXME: the handle_busy_flags logic needs re-visit, we should lock
++	 * here and unlock after the loop is done
++	 */
++	while (!jesd204_fsm_table_end(&it->table[0], rollback)) {
++		it->table = table;
++
++		state_op = &jdev->dev_data->state_ops[table[0].op];
++
++		data->completed = false;
++		data->cur_state = init_state;
++		data->nxt_state = table[0].state;
++		data->rollback = rollback;
++
++		ret = __jesd204_fsm(jdev, jdev_top, data, handle_busy_flags);
++
++		if (ret == -EINVALID_STATE && data->resuming)
++			goto next_state;
++
++		if (ret && !rollback) {
++			const struct jesd204_fsm_table_entry *t = table;
++			ret1 = ret;
++			if (!t[0].first)
++				t--;
++			jesd204_err(jdev, "Rolling back from '%s', got error %d\n",
++				    jesd204_state_str(t[0].state), ret);
++			rollback = true;
++			continue;
++		}
++
++		jesd204_fsm_set_paused_state(jdev, jdev_top, data->link_idx,
++					     table, data->has_paused);
++
++		if (data->has_paused)
++			break;
++
++		if (!data->completed && !rollback)
++			break;
++
++		data->resuming = false;
++next_state:
++		init_state = table[0].state;
++
++		if (rollback)
++			table--;
++		else
++			table++;
++	}
++
++	return ret1;
++}
++
++static int jesd204_fsm_run_finished_cb_cb(struct jesd204_dev *jdev,
++					  struct jesd204_dev_con_out *con,
++					  unsigned int link_idx,
++					  struct jesd204_fsm_data *fsm_data)
++{
++	const struct jesd204_link * const *links = fsm_data->cb_data;
++
++	if (!jdev->dev_data->fsm_finished_cb)
++		return JESD204_STATE_CHANGE_DONE;
++
++	jdev->dev_data->fsm_finished_cb(jdev, links,
++					fsm_data->jdev_top->num_links);
++
++	return JESD204_STATE_CHANGE_DONE;
++}
++
++static void jesd204_fsm_run_finished_cb(struct jesd204_dev *jdev,
++					struct jesd204_dev_top *jdev_top,
++					unsigned int link_idx,
++					bool handle_busy_flags)
++{
++	struct jesd204_fsm_data data;
++	struct jesd204_link **links;
++	unsigned int i;
++
++	links = kcalloc(jdev_top->num_links, sizeof(*links), GFP_KERNEL);
++	if (!links)
++		return;
++
++	for (i = 0; i < jdev_top->num_links; i++)
++		links[i] = &jdev_top->active_links[i].link;
++
++	memset(&data, 0, sizeof(data));
++	data.fsm_change_cb = jesd204_fsm_run_finished_cb_cb;
++	data.cur_state = JESD204_STATE_DONT_CARE;
++	data.nxt_state = JESD204_STATE_DONT_CARE;
++	data.link_idx = link_idx;
++	data.mode = JESD204_STATE_OP_MODE_PER_DEVICE;
++	data.cb_data = links;
++
++	jesd204_fsm(jdev, &data, handle_busy_flags);
++
++	kfree(links);
++}
++
++static int jesd204_fsm_table(struct jesd204_dev *jdev,
++			     unsigned int link_idx,
++			     enum jesd204_dev_state init_state,
++			     const struct jesd204_fsm_table_entry *table,
++			     bool rollback,
++			     bool resuming,
++			     bool handle_busy_flags)
++{
++	struct jesd204_dev_top *jdev_top = jesd204_dev_get_topology_top_dev(jdev);
++	struct jesd204_fsm_table_entry_iter it;
++	struct jesd204_fsm_data data;
++	unsigned int num_retries;
++	int ret;
++
++	if (!jdev_top)
++		return -EFAULT;
++
++	memset(&data, 0, sizeof(data));
++	data.fsm_change_cb = jesd204_fsm_table_entry_cb;
++	data.fsm_complete_cb = jesd204_fsm_table_entry_done;
++	data.resuming = resuming;
++	data.cb_data = &it;
++	data.link_idx = link_idx;
++
++	num_retries = jdev_top->num_retries;
++
++	do {
++		ret = jesd204_fsm_table_single(jdev, jdev_top, &data,
++					       init_state, table, rollback,
++					       handle_busy_flags);
++		/**
++		 * If we got an error, we rolled-back, we should be in IDLE
++		 * for the next retry, and clear errors on JESD204 link objects
++		 */
++		if (ret && num_retries) {
++			init_state = JESD204_STATE_IDLE;
++			__jesd204_fsm_clear_errors(jdev, link_idx,
++						   handle_busy_flags);
++		}
++	} while (ret && num_retries--);
++
++	if (ret)
++		jesd204_err(jdev, "FSM completed with error %d\n", ret);
++
++	jesd204_fsm_run_finished_cb(jdev, jdev_top, link_idx, handle_busy_flags);
++
++	return ret;
++}
++
++void jesd204_fsm_stop(struct jesd204_dev *jdev, unsigned int link_idx)
++{
++	const struct jesd204_fsm_table_entry *start;
++
++	if (!jdev->fsm_inited)
++		return;
++
++	start = &jesd204_start_links_states[ARRAY_SIZE(jesd204_start_links_states) - 1];
++
++	jesd204_fsm_table(jdev, link_idx, start->state, start, true, false, true);
++}
++EXPORT_SYMBOL_GPL(jesd204_fsm_stop);
++
++static int jesd204_fsm_clr_errors_cb(struct jesd204_dev *jdev,
++				     struct jesd204_dev_con_out *con,
++				     unsigned int link_idx,
++				     struct jesd204_fsm_data *fsm_data)
++{
++	struct jesd204_link_opaque *ol;
++
++	if (con) {
++		con->error = 0;
++		return JESD204_STATE_CHANGE_DONE;
++	}
++
++	ol = &fsm_data->jdev_top->active_links[link_idx];
++	ol->link.error = 0;
++
++	return JESD204_STATE_CHANGE_DONE;
++}
++
++static void __jesd204_fsm_clear_errors(struct jesd204_dev *jdev,
++				       unsigned int link_idx,
++				       bool handle_busy_flags)
++{
++	struct jesd204_fsm_data data;
++
++	memset(&data, 0, sizeof(data));
++	data.fsm_change_cb = jesd204_fsm_clr_errors_cb;
++	data.cur_state = JESD204_STATE_DONT_CARE;
++	data.nxt_state = JESD204_STATE_DONT_CARE;
++	data.link_idx = link_idx;
++
++	jesd204_fsm(jdev, &data, handle_busy_flags);
++}
++
++void jesd204_fsm_clear_errors(struct jesd204_dev *jdev, unsigned int link_idx)
++{
++	__jesd204_fsm_clear_errors(jdev, link_idx, true);
++}
++EXPORT_SYMBOL_GPL(jesd204_fsm_clear_errors);
+diff --git a/drivers/jesd204/jesd204-priv.h b/drivers/jesd204/jesd204-priv.h
+new file mode 100644
+index 000000000..a12a3fd18
+--- /dev/null
++++ b/drivers/jesd204/jesd204-priv.h
+@@ -0,0 +1,246 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/**
++ * The JESD204 framework
++ *
++ * Copyright (c) 2019 Analog Devices Inc.
++ */
++
++#ifndef _JESD204_PRIV_H_
++#define _JESD204_PRIV_H_
++
++#include <linux/jesd204/jesd204.h>
++
++#define JESD204_MAX_LINKS		16
++
++struct jesd204_dev;
++struct jesd204_dev_top;
++struct jesd204_link_opaque;
++struct jesd204_dev_con_out;
++struct jesd204_fsm_data;
++
++#define JESD204_STATE_FSM_OFFSET	100
++
++#define JESD204_STATE_ENUM(x)	\
++	JESD204_STATE_##x = (JESD204_FSM_STATE_##x + JESD204_STATE_FSM_OFFSET)
++
++enum jesd204_dev_state {
++	JESD204_STATE_UNINIT = 0,
++	JESD204_STATE_INITIALIZED,
++	JESD204_STATE_PROBED,
++	JESD204_STATE_IDLE,
++	JESD204_STATE_ENUM(DEVICE_INIT),
++	JESD204_STATE_ENUM(LINK_INIT),
++	JESD204_STATE_ENUM(LINK_SUPPORTED),
++	JESD204_STATE_ENUM(LINK_PRE_SETUP),
++	JESD204_STATE_ENUM(CLK_SYNC_STAGE1),
++	JESD204_STATE_ENUM(CLK_SYNC_STAGE2),
++	JESD204_STATE_ENUM(CLK_SYNC_STAGE3),
++	JESD204_STATE_ENUM(LINK_SETUP),
++	JESD204_STATE_ENUM(OPT_SETUP_STAGE1),
++	JESD204_STATE_ENUM(OPT_SETUP_STAGE2),
++	JESD204_STATE_ENUM(OPT_SETUP_STAGE3),
++	JESD204_STATE_ENUM(OPT_SETUP_STAGE4),
++	JESD204_STATE_ENUM(OPT_SETUP_STAGE5),
++	JESD204_STATE_ENUM(CLOCKS_ENABLE),
++	JESD204_STATE_ENUM(LINK_ENABLE),
++	JESD204_STATE_ENUM(LINK_RUNNING),
++	JESD204_STATE_ENUM(OPT_POST_RUNNING_STAGE),
++	JESD204_STATE_DONT_CARE = 999,
++};
++
++/**
++ * struct jesd204_dev_list_entry - Entry for a JESD204 device in a list
++ * @entry		list entry for a device to keep a list of devices
++ * @jdev		pointer to JESD204 device for this list entry
++ */
++struct jesd204_dev_list_entry {
++	struct list_head		entry;
++	struct jesd204_dev		*jdev;
++};
++
++/**
++ * struct jesd204_dev_con_out - Output connection of a JESD204 device
++ * @id			unique ID for this connection
++ * @entry		list entry for a device to keep a list of connections
++ * @owner		pointer to JESD204 device to which this connection
++ *			belongs to
++ * @jdev_top		pointer to JESD204 top device, to which this connection
++ *			belongs to
++ * @topo_id		topology ID, that this connection belongs to
++ *			(must match JESD204 top device)
++ * @link_id		JESD204 link ID, that this connection belongs to
++ *			(obtained from DT, must match a link ID in the top device)
++ * @link_idx		JESD204 link index in the list of link IDs of the top device
++ *			(computed at initialize)
++ * @dests		list of JESD204 devices this connection is connected
++ *			as input
++ * @dests_count		number of connected JESD204 devices to this output
++ * @of			device-tree reference and arguments for this connection
++ * @error		error code for this connection
++ * @state		current state of this connection
++ */
++struct jesd204_dev_con_out {
++	unsigned int			id;
++	struct list_head		entry;
++	struct jesd204_dev		*owner;
++	struct jesd204_dev_top		*jdev_top;
++	unsigned int			topo_id;
++	unsigned int			link_id;
++	unsigned int			link_idx;
++	struct list_head		dests;
++	unsigned int			dests_count;
++	struct of_phandle_args		of;
++	int				error;
++	enum jesd204_dev_state		state;
++};
++
++/**
++ * struct jesd204_dev - JESD204 device
++ * @dev			underlying device object
++ * @dev_data		ref to data provided by the driver registering with the framework
++ * @id			unique device id
++ * @entry		list entry for the framework to keep a list of devices
++ * @priv		private data to be returned to the driver
++ * @fsm_inited		true if the FSM has been initialized for this device
++ * @is_top		true if this device is a top device in a topology of
++ *			devices that make up a JESD204 link (typically the
++ *			device that is the ADC, DAC, or transceiver)
++ * @is_sysref_provider	true if this device wants to be a SYSREF provider
++ * @is_sec_sysref_provider true if this device wants to be the secondary SYSREF provider
++ * @stop_states		array of states on which to stop, after finishing transition
++ * @sysfs_attr_group	attribute group for the sysfs files of this JESD204 device
++ * @np			reference in the device-tree for this JESD204 device
++ * @ref			ref count for this JESD204 device
++ * @inputs		array of pointers to output connections from other
++ *			devices
++ * @inputs_count	number of @inputs in the array
++ * @outputs		list of output connections that take input from this
++ *			device
++ * @outputs_count	number of @outputs in the list
++ */
++struct jesd204_dev {
++	struct device			dev;
++	const struct jesd204_dev_data	*dev_data;
++	int				id;
++	struct list_head		entry;
++	void				*priv;
++
++	bool				fsm_inited;
++	bool				is_top;
++
++	bool				is_sysref_provider;
++	bool				is_sec_sysref_provider;
++	bool				stop_states[JESD204_FSM_STATES_NUM + 1];
++
++	struct device_node		*np;
++
++	struct attribute_group		sysfs_attr_group;
++
++	struct jesd204_dev_con_out	**inputs;
++	unsigned int			inputs_count;
++	struct list_head		outputs;
++	unsigned int			outputs_count;
++};
++
++#define dev_to_jesd204_dev(dev)		\
++	container_of(dev, struct jesd204_dev, dev)
++
++/**
++ * struct jesd204_link_opaque - JESD204 link information (opaque part)
++ * @link		public link information
++ * @jdev_top		JESD204 top level this links belongs to
++ * @link_idx		Index in the array of JESD204 links in @jdev_top
++ * @cb_ref		kref which for each JESD204 link will increment when it
++ *			needs to defer a state transition; an equivalent
++ *			notification must be called by the device to decrement
++ *			this and finally call the @fsm_complete_cbs
++ *			callback (if provided)
++ * @state		current state of the JESD204 link
++ * @fsm_paused		true if the FSM has paused during a transition (set)
++ * @fsm_data		reference to state-transition information
++ * @flags		internal flags set by the framework
++ */
++struct jesd204_link_opaque {
++	struct jesd204_link		link;
++	struct jesd204_dev_top		*jdev_top;
++	unsigned int			link_idx;
++
++	struct kref			cb_ref;
++	enum jesd204_dev_state		state;
++	bool				fsm_paused;
++	bool				fsm_ignore_errors;
++	struct jesd204_fsm_data		*fsm_data;
++	unsigned long			flags;
++};
++
++/**
++ * struct jesd204_dev_top - JESD204 top device (in a JESD204 topology)
++ * @jdev		JESD204 device data
++ * @entry		list entry for the framework to keep a list of top
++ *			devices (and implicitly topologies)
++ * @initialized		true the topoology connections have been initialized
++ * @num_retries		number of retries if an error occurs
++ * @jdev_sysref		reference to the object that is the SYSREF provider for this topology
++ * @jdev_sysref_sec	reference to the object that is the secondary SYSREF provider
++ * 			for this topology, in case the primary jdev_sysref doesn't exist
++ * @fsm_data		ref to JESD204 FSM data for JESD204_LNK_FSM_PARALLEL
++ * @cb_ref		kref which for each JESD204 link will increment when it
++ *			needs to defer a state transition; this is similar to the
++ *			cb_ref on the jesd204_link_opaque struct, but each link
++ *			increments/decrements it, to group transitions of multiple
++ *			JESD204 links
++ * @topo_id		topology ID for this device (and top-level device)
++ *			(connections should match against this)
++ * @link_ids		JESD204 link IDs for this top-level device
++ *			(connections should match against this)
++ * @num_links		number of links
++ * @init_links		initial settings passed from the driver
++ * @active_links	active JESD204 link settings
++ * @staged_links	JESD204 link settings staged to be committed as active
++ */
++struct jesd204_dev_top {
++	struct jesd204_dev		jdev;
++	struct list_head		entry;
++	bool				initialized;
++	unsigned int			num_retries;
++
++	struct jesd204_dev		*jdev_sysref;
++	struct jesd204_dev		*jdev_sysref_sec;
++
++	struct jesd204_fsm_data		*fsm_data;
++	struct kref			cb_ref;
++
++	int				topo_id;
++	unsigned int			link_ids[JESD204_MAX_LINKS];
++	unsigned int			num_links;
++
++	const struct jesd204_link	*init_links;
++	struct jesd204_link_opaque	*active_links;
++	struct jesd204_link_opaque	*staged_links;
++};
++
++int jesd204_device_count_get(void);
++
++struct jesd204_dev_top *jesd204_dev_get_topology_top_dev(struct jesd204_dev *jdev);
++
++static inline struct jesd204_dev_top *jesd204_dev_top_dev(
++		struct jesd204_dev *jdev)
++{
++	if (!jdev || !jdev->is_top)
++		return NULL;
++	return container_of(jdev, struct jesd204_dev_top, jdev);
++}
++
++const char *jesd204_state_str(enum jesd204_dev_state state);
++
++int jesd204_dev_init_link_data(struct jesd204_dev_top *jdev_top,
++			       unsigned int link_idx);
++
++int jesd204_init_topology(struct jesd204_dev_top *jdev_top);
++
++int jesd204_fsm_probe(struct jesd204_dev *jdev);
++
++int jesd204_dev_create_sysfs(struct jesd204_dev *jdev);
++void jesd204_dev_destroy_sysfs(struct jesd204_dev *jdev);
++
++#endif /* _JESD204_PRIV_H_ */
+diff --git a/drivers/jesd204/jesd204-sysfs.c b/drivers/jesd204/jesd204-sysfs.c
+new file mode 100644
+index 000000000..e9ddd4e78
+--- /dev/null
++++ b/drivers/jesd204/jesd204-sysfs.c
+@@ -0,0 +1,714 @@
++// SPDX-License-Identifier: GPL-2.0+
++/**
++ * The JESD204 framework - sysfs hooks
++ *
++ * Copyright (c) 2019 Analog Devices Inc.
++ */
++
++#include <linux/device.h>
++#include <linux/of.h>
++#include <linux/slab.h>
++
++#include "jesd204-priv.h"
++#include "attr.h"
++
++/* FIXME: should go away in newer kernels */
++#ifndef sizeof_field
++#define sizeof_field(TYPE, MEMBER) sizeof((((TYPE *)0)->MEMBER))
++#endif
++
++#define JESD204_CON_ATTR(_name)	\
++	[JESD204_CON_ATTR_ ## _name] = { .name = __stringify(_name) }
++
++#define JESD204_LNK_ATTR_TYPE(_name, _type)				\
++	[JESD204_LNK_ATTR_ ## _name] = {				\
++		.name = __stringify(_name),				\
++		.offset = offsetof(struct jesd204_link, _name),		\
++		.size = sizeof_field(struct jesd204_link, _name),	\
++		.type = _type,						\
++	}
++
++#define JESD204_LNK_ATTR_TYPE_PRIV(_name, _type)			\
++	[JESD204_LNK_ATTR_ ## _name] = {				\
++		.name = __stringify(_name),				\
++		.offset = offsetof(struct jesd204_link_opaque, _name),	\
++		.size = sizeof_field(struct jesd204_link_opaque, _name),\
++		.type = _type,						\
++		.priv = true,						\
++	}
++
++#define JESD204_LNK_ATTR_INT(_name)	\
++	JESD204_LNK_ATTR_TYPE(_name, JESD204_ATTR_TYPE_INT)
++
++#define JESD204_LNK_ATTR_UINT(_name)	\
++	JESD204_LNK_ATTR_TYPE(_name, JESD204_ATTR_TYPE_UINT)
++
++#define JESD204_LNK_ATTR_BOOL(_name)	\
++	JESD204_LNK_ATTR_TYPE(_name, JESD204_ATTR_TYPE_BOOL)
++
++#define JESD204_LNK_ATTR_BOOL_PRIV(_name)	\
++	JESD204_LNK_ATTR_TYPE_PRIV(_name, JESD204_ATTR_TYPE_BOOL)
++
++#define JESD204_LNK_ATTR_STR_PRIV(_name)	\
++	JESD204_LNK_ATTR_TYPE_PRIV(_name, JESD204_ATTR_TYPE_STR)
++
++enum {
++	JESD204_ATTR_TYPE_INT,
++	JESD204_ATTR_TYPE_UINT,
++	JESD204_ATTR_TYPE_BOOL,
++	JESD204_ATTR_TYPE_STR,
++};
++
++struct jesd204_attr {
++	const char *name;
++	size_t offset;
++	size_t size;
++	int type;
++	bool priv;
++};
++
++enum {
++	JESD204_CON_ATTR_to,
++	JESD204_CON_ATTR_id,
++	JESD204_CON_ATTR_topo_id,
++	JESD204_CON_ATTR_link_id,
++	JESD204_CON_ATTR_state,
++	JESD204_CON_ATTR_error,
++};
++
++static const struct attribute jesd204_con_attrs[] = {
++	JESD204_CON_ATTR(to),
++	JESD204_CON_ATTR(id),
++	JESD204_CON_ATTR(topo_id),
++	JESD204_CON_ATTR(link_id),
++	JESD204_CON_ATTR(state),
++	JESD204_CON_ATTR(error),
++};
++
++enum {
++	JESD204_LNK_ATTR_link_id,
++	JESD204_LNK_ATTR_error,
++	JESD204_LNK_ATTR_state,
++	JESD204_LNK_ATTR_fsm_paused,
++	JESD204_LNK_ATTR_fsm_ignore_errors,
++	JESD204_LNK_ATTR_sample_rate,
++	JESD204_LNK_ATTR_is_transmit,
++	JESD204_LNK_ATTR_num_lanes,
++	JESD204_LNK_ATTR_num_converters,
++	JESD204_LNK_ATTR_octets_per_frame,
++	JESD204_LNK_ATTR_frames_per_multiframe,
++	JESD204_LNK_ATTR_num_of_multiblocks_in_emb,
++	JESD204_LNK_ATTR_bits_per_sample,
++	JESD204_LNK_ATTR_converter_resolution,
++	JESD204_LNK_ATTR_jesd_version,
++	JESD204_LNK_ATTR_jesd_encoder,
++	JESD204_LNK_ATTR_subclass,
++	JESD204_LNK_ATTR_device_id,
++	JESD204_LNK_ATTR_bank_id,
++	JESD204_LNK_ATTR_scrambling,
++	JESD204_LNK_ATTR_high_density,
++	JESD204_LNK_ATTR_ctrl_words_per_frame_clk,
++	JESD204_LNK_ATTR_ctrl_bits_per_sample,
++	JESD204_LNK_ATTR_samples_per_conv_frame,
++	JESD204_LNK_ATTR_dac_adj_resolution_steps,
++	JESD204_LNK_ATTR_dac_adj_direction,
++	JESD204_LNK_ATTR_dac_phase_adj,
++};
++
++static const struct jesd204_attr jesd204_lnk_attrs[] = {
++	JESD204_LNK_ATTR_UINT(link_id),
++	JESD204_LNK_ATTR_INT(error),
++	JESD204_LNK_ATTR_STR_PRIV(state),
++	JESD204_LNK_ATTR_BOOL_PRIV(fsm_paused),
++	JESD204_LNK_ATTR_BOOL_PRIV(fsm_ignore_errors),
++	JESD204_LNK_ATTR_UINT(sample_rate),
++	JESD204_LNK_ATTR_BOOL(is_transmit),
++	JESD204_LNK_ATTR_UINT(num_lanes),
++	JESD204_LNK_ATTR_UINT(num_converters),
++	JESD204_LNK_ATTR_UINT(octets_per_frame),
++	JESD204_LNK_ATTR_UINT(frames_per_multiframe),
++	JESD204_LNK_ATTR_UINT(num_of_multiblocks_in_emb),
++	JESD204_LNK_ATTR_UINT(bits_per_sample),
++	JESD204_LNK_ATTR_UINT(converter_resolution),
++	JESD204_LNK_ATTR_UINT(jesd_version),
++	JESD204_LNK_ATTR_UINT(jesd_encoder),
++	JESD204_LNK_ATTR_UINT(subclass),
++	JESD204_LNK_ATTR_UINT(device_id),
++	JESD204_LNK_ATTR_UINT(bank_id),
++	JESD204_LNK_ATTR_BOOL(scrambling),
++	JESD204_LNK_ATTR_BOOL(high_density),
++	JESD204_LNK_ATTR_UINT(ctrl_words_per_frame_clk),
++	JESD204_LNK_ATTR_UINT(ctrl_bits_per_sample),
++	JESD204_LNK_ATTR_UINT(samples_per_conv_frame),
++	JESD204_LNK_ATTR_UINT(dac_adj_resolution_steps),
++	JESD204_LNK_ATTR_UINT(dac_adj_direction),
++	JESD204_LNK_ATTR_BOOL(dac_phase_adj),
++};
++
++static int __jesd204_match_attribute_name(const struct jesd204_attr *array,
++					  size_t n, const char *string)
++{
++	int index;
++
++	for (index = 0; index < n; index++) {
++		if (!strcmp(array[index].name, string))
++			return index;
++	}
++
++	return -EINVAL;
++}
++
++#define jesd204_match_attribute_name(_a, _s)	\
++	__jesd204_match_attribute_name(_a, ARRAY_SIZE(_a), _s)
++
++static ssize_t name_show(struct device *dev,
++			 struct device_attribute *devattr,
++			 char *buf)
++{
++	struct jesd204_dev *jdev = dev_to_jesd204_dev(dev);
++
++	if (!jdev->dev.parent)
++		return sprintf(buf, "%pOF,%s\n", jdev->np, dev_name(&jdev->dev));
++
++	return sprintf(buf, "%pOF,%s,parent=%s\n", jdev->np, dev_name(&jdev->dev), dev_name(jdev->dev.parent));
++}
++static DEVICE_ATTR_RO(name);
++
++static struct attribute *jesd204_static_attributes[] = {
++	&dev_attr_name.attr,
++};
++
++static ssize_t jesd204_con_printf(struct jesd204_dev *jdev,
++				  const char *str,
++				  struct jesd204_dev_con_out *con,
++				  char *buf)
++{
++	int attr_idx;
++
++	if (!jdev)
++		return -ENODEV;
++
++	attr_idx = match_attribute_name(jesd204_con_attrs, str);
++	if (attr_idx < 0)
++		return attr_idx;
++
++	switch (attr_idx) {
++	case JESD204_CON_ATTR_to:
++		return name_show(&jdev->dev, NULL, buf);
++	case JESD204_CON_ATTR_id:
++		return sprintf(buf, "%u\n", con->id);
++	case JESD204_CON_ATTR_topo_id:
++		return sprintf(buf, "%u\n", con->topo_id);
++	case JESD204_CON_ATTR_link_id:
++		return sprintf(buf, "%u\n", con->link_id);
++	case JESD204_CON_ATTR_state:
++		return sprintf(buf, "%s\n", jesd204_state_str(con->state));
++	case JESD204_CON_ATTR_error:
++		return sprintf(buf, "%d\n", con->error);
++	default:
++		return -EINVAL;
++	}
++}
++
++static char *str_cut_from_chr(char *s, char c)
++{
++	char *ptr = strchr(s, '_');
++
++	if (!ptr)
++		return NULL;
++	*ptr = '\0';
++	ptr++;
++
++	return ptr;
++}
++
++static ssize_t jesd204_con_show(struct device *dev,
++				struct device_attribute *conattr,
++				char *buf)
++{
++	struct jesd204_dev *jdev = dev_to_jesd204_dev(dev);
++	struct jesd204_dev_con_out *con;
++	unsigned int len, idx, iter_idx;
++	struct jesd204_dev_list_entry *e;
++	char *name, *ptr, *ptr1;
++	int rc;
++
++	if (!jdev)
++		return -ENOENT;
++
++	name = kstrdup(conattr->attr.name, GFP_KERNEL);
++	if (!name)
++		return -ENOMEM;
++
++	/* cut string at first '_' */
++	ptr = str_cut_from_chr(name, '_');
++	if (!ptr) {
++		rc = -EINVAL;
++		goto out;
++	}
++
++	len = sizeof("in") - 1;
++	if (strncmp("in", name, len) == 0) {
++		rc = kstrtouint(&name[len], 10, &idx);
++		if (rc)
++			goto out;
++
++		if (idx >= jdev->inputs_count) {
++			rc = -ERANGE;
++			goto out;
++		}
++
++		con = jdev->inputs[idx];
++		rc = jesd204_con_printf(con->owner, ptr, con, buf);
++		goto out;
++	}
++
++	len = sizeof("out") - 1;
++	if (strncmp("out", name, len) != 0) {
++		rc = -EINVAL;
++		goto out;
++	}
++
++	/* get X from `outX_Y` first */
++	rc = kstrtouint(&name[len], 10, &idx);
++	if (rc)
++		goto out;
++
++	if (idx >= jdev->outputs_count) {
++		rc = -ERANGE;
++		goto out;
++	}
++
++	iter_idx = 0;
++	list_for_each_entry(con, &jdev->outputs, entry) {
++		if (idx == iter_idx)
++			break;
++		iter_idx++;
++	}
++
++	/* now get Y from `outX_Y` */
++	ptr1 = str_cut_from_chr(ptr, '_');
++	if (!ptr1) {
++		rc = -EINVAL;
++		goto out;
++	}
++
++	rc = kstrtouint(ptr, 10, &idx);
++	if (rc)
++		goto out;
++
++	if (idx >= con->dests_count) {
++		rc = -ERANGE;
++		goto out;
++	}
++
++	iter_idx = 0;
++	list_for_each_entry(e, &con->dests, entry) {
++		if (idx == iter_idx) {
++			rc = jesd204_con_printf(e->jdev, ptr1, con, buf);
++			break;
++		}
++	}
++
++out:
++	kfree(name);
++	return rc;
++}
++
++static ssize_t jesd204_show_store_int(u64 *val, size_t usize,
++				      char *wbuf, const char *rbuf,
++				      size_t count, bool store, bool is_signed)
++{
++	u64 val1 = 0;
++	int ret, max;
++
++	if (!store) {
++		memcpy(&val1, val, usize);
++		if (is_signed)
++			return sprintf(wbuf, "%lld\n", val1);
++		return sprintf(wbuf, "%llu\n", val1);
++	}
++
++	if (is_signed)
++		ret = kstrtoll(rbuf, 0, &val1);
++	else
++		ret = kstrtoull(rbuf, 0, &val1);
++	if (ret)
++		return ret;
++
++	switch (usize) {
++	case 1:
++		max = 0xff;
++		break;
++	case 2:
++		max = 0xffff;
++		break;
++	case 4:
++		max = 0xffffffff;
++		break;
++	case 8:
++		max = 0;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	if (max && val1 > max)
++		return -EINVAL;
++
++	memcpy(val, &val1, usize);
++
++	return count;
++}
++
++static ssize_t jesd204_show_store_bool(bool *val, char *wbuf, const char *rbuf,
++				       size_t count, bool store)
++{
++	u64 val1;
++	int ret;
++
++	if (!store)
++		return sprintf(wbuf, "%u\n", !!(*val));
++
++	ret = kstrtoull(rbuf, 0, &val1);
++	if (ret)
++		return ret;
++	*val = !!val1;
++
++	return count;
++}
++
++static ssize_t jesd204_lnk_show_store_str(u32 *val,
++					  const char *attr_name,
++					  char *wbuf, const char *rbuf,
++					  size_t count, bool store)
++{
++	if (!wbuf)
++		return -EINVAL;
++
++	if (sysfs_streq("state", attr_name))
++		return sprintf(wbuf, "%s\n", jesd204_state_str(*val));
++
++	return -EINVAL;
++}
++
++static ssize_t jesd204_link_show_store(struct device *dev,
++				       struct device_attribute *devattr,
++				       char *wbuf, const char *rbuf,
++				       size_t count, bool store)
++{
++	struct jesd204_dev *jdev = dev_to_jesd204_dev(dev);
++	struct jesd204_dev_top *jdev_top = jesd204_dev_top_dev(jdev);
++	const struct jesd204_attr *jattr;
++	struct attribute *attr;
++	void *field;
++	char *name, *ptr;
++	unsigned int idx;
++	int len, ret;
++	bool is_signed = false;
++
++	if (!jdev_top || !jdev_top->num_links || !jdev_top->active_links)
++		return -ENOENT;
++
++	attr = &devattr->attr;
++	name = kstrdup(attr->name, GFP_KERNEL);
++	if (!name)
++		return -ENOMEM;
++
++	len = sizeof("link") - 1;
++	if (strncmp(name, "link", len)) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	ptr = str_cut_from_chr(name, '_');
++	if (!ptr) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	ret = kstrtouint(&name[len], 0, &idx);
++	if (ret)
++		goto out;
++
++	if (idx >= jdev_top->num_links) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	ret = jesd204_match_attribute_name(jesd204_lnk_attrs, ptr);
++	if (ret < 0)
++		goto out;
++
++	jattr = &jesd204_lnk_attrs[ret];
++	if (jattr->priv)
++		field = &jdev_top->active_links[idx];
++	else
++		field = &jdev_top->active_links[idx].link;
++
++	field += jattr->offset;
++
++	switch (jattr->type) {
++	case JESD204_ATTR_TYPE_STR:
++		ret = jesd204_lnk_show_store_str(field, jattr->name,
++						 wbuf, rbuf, count, store);
++		break;
++	case JESD204_ATTR_TYPE_BOOL:
++		ret = jesd204_show_store_bool(field, wbuf, rbuf,
++					      count, store);
++		break;
++	case JESD204_ATTR_TYPE_INT:
++		is_signed = true;
++		/* fall-through */
++	case JESD204_ATTR_TYPE_UINT:
++		ret = jesd204_show_store_int(field, jattr->size, wbuf, rbuf,
++					     count, store, is_signed);
++		break;
++	default:
++		ret = -EINVAL;
++		goto out;
++	}
++
++out:
++	kfree(name);
++
++	return ret;
++}
++
++static ssize_t jesd204_link_show(struct device *dev,
++				 struct device_attribute *devattr,
++				 char *buf)
++{
++	return jesd204_link_show_store(dev, devattr, buf, NULL, 0, false);
++}
++
++static ssize_t jesd204_link_store(struct device *dev,
++				struct device_attribute *devattr,
++				const char *buf, size_t count)
++{
++	return jesd204_link_show_store(dev, devattr, NULL, buf, count, true);
++}
++
++static ssize_t jesd204_top_show(struct device *dev,
++			 struct device_attribute *devattr,
++			 char *buf)
++{
++	struct jesd204_dev *jdev = dev_to_jesd204_dev(dev);
++	struct jesd204_dev_top *jdev_top = jesd204_dev_top_dev(jdev);
++	struct attribute *attr;
++
++	if (!jdev_top)
++		return -EINVAL;
++
++	attr = &devattr->attr;
++	if (strcmp(attr->name, "initialized") == 0)
++		return sprintf(buf, "%d\n", jdev_top->initialized);
++	else if (strcmp(attr->name, "num_retries") == 0)
++		return sprintf(buf, "%u\n", jdev_top->num_retries);
++	else if (strcmp(attr->name, "topology_id") == 0)
++		return sprintf(buf, "%u\n", jdev_top->topo_id);
++	else if (strcmp(attr->name, "num_links") == 0)
++		return sprintf(buf, "%u\n", jdev_top->num_links);
++
++	if (strcmp(attr->name, "link_ids") == 0) {
++		int i, ret = 0;
++
++		for (i = 0; i < jdev_top->num_links; i++)
++			ret += sprintf(&buf[ret], "%u ", jdev_top->link_ids[i]);
++		ret += sprintf(&buf[ret], "\n");
++
++		return ret;
++	}
++
++	return -EINVAL;
++}
++
++#define JESD204_TOP_DEVICE_ATTR_RO(_name) \
++	struct device_attribute dev_attr_##_name = \
++		__ATTR(_name, 0444, jesd204_top_show, NULL)
++
++static JESD204_TOP_DEVICE_ATTR_RO(initialized);
++static JESD204_TOP_DEVICE_ATTR_RO(num_retries);
++static JESD204_TOP_DEVICE_ATTR_RO(topology_id);
++static JESD204_TOP_DEVICE_ATTR_RO(num_links);
++static JESD204_TOP_DEVICE_ATTR_RO(link_ids);
++
++static struct attribute *jesd204_top_static_attributes[] = {
++	&dev_attr_initialized.attr,
++	&dev_attr_num_retries.attr,
++	&dev_attr_topology_id.attr,
++	&dev_attr_num_links.attr,
++	&dev_attr_link_ids.attr,
++};
++
++static int jesd204_dev_create_con_io_attrs(struct device *parent,
++					   struct device_attribute *conattrs,
++					   int conattr_idx, int i1, int i2)
++{
++	struct attribute *attr;
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(jesd204_con_attrs); i++, conattr_idx++) {
++		attr = &(conattrs[conattr_idx].attr);
++		if (i2 > -1)
++			attr->name = devm_kasprintf(parent, GFP_KERNEL,
++						    "out%d_%d_%s", i1, i2,
++						    jesd204_con_attrs[i].name);
++		else
++			attr->name = devm_kasprintf(parent, GFP_KERNEL,
++						    "in%d_%s", i1,
++						    jesd204_con_attrs[i].name);
++		if (!attr->name)
++			return -ENOMEM;
++		if (jesd204_con_attrs[i].mode)
++			attr->mode = jesd204_con_attrs[i].mode;
++		else
++			attr->mode = 0444;
++		conattrs[conattr_idx].show = jesd204_con_show;
++	}
++
++	return conattr_idx;
++}
++
++static struct device_attribute *jesd204_dev_create_con_attrs(
++		struct jesd204_dev *jdev, int *count)
++{
++	struct device *parent = jdev->dev.parent;
++	struct device_attribute *conattrs;
++	struct jesd204_dev_con_out *c;
++	int conattrs_idx, i1, i2, ret;
++
++	/* count all inputs & outputs */
++	*count = jdev->inputs_count * ARRAY_SIZE(jesd204_con_attrs);
++	list_for_each_entry(c, &jdev->outputs, entry)
++		*count += c->dests_count * ARRAY_SIZE(jesd204_con_attrs);
++
++	if (*count == 0)
++		return NULL;
++
++	/* alloc device attributes */
++	conattrs = devm_kcalloc(parent, *count, sizeof(*conattrs),
++				GFP_KERNEL);
++	if (!conattrs)
++		return ERR_PTR(-ENOMEM);
++
++	conattrs_idx = 0;
++	for (i1 = 0; i1 < jdev->inputs_count; i1++) {
++		ret = jesd204_dev_create_con_io_attrs(parent, conattrs,
++						      conattrs_idx, i1, -1);
++		if (ret < 0)
++			return ERR_PTR(ret);
++		conattrs_idx = ret;
++	}
++
++	i1 = 0;
++	list_for_each_entry(c, &jdev->outputs, entry) {
++		for (i2 = 0; i2 < c->dests_count; i2++) {
++			ret = jesd204_dev_create_con_io_attrs(parent,
++							      conattrs,
++							      conattrs_idx,
++							      i1, i2);
++			if (ret < 0)
++				return ERR_PTR(ret);
++			conattrs_idx = ret;
++		}
++		i1++;
++	}
++
++	return conattrs;
++}
++
++static struct device_attribute *jesd204_dev_create_lnk_attrs(
++		struct jesd204_dev *jdev, int *count)
++{
++	struct jesd204_dev_top *jdev_top = jesd204_dev_top_dev(jdev);
++	struct device *parent = jdev->dev.parent;
++	struct device_attribute *lnkattrs;
++	const struct jesd204_attr *jattr;
++	struct attribute *attr;
++	int num_lnk_attrs = ARRAY_SIZE(jesd204_lnk_attrs);
++	int i1, i2, lnkattr_idx;
++
++	if (!jdev_top || !jdev_top->num_links) {
++		*count = 0;
++		return NULL;
++	}
++
++	*count = jdev_top->num_links * num_lnk_attrs;
++
++	lnkattrs = devm_kcalloc(parent, *count, sizeof(*lnkattrs),
++				GFP_KERNEL);
++	if (!lnkattrs)
++		return ERR_PTR(-ENOMEM);
++
++	lnkattr_idx = 0;
++	for (i1 = 0; i1 < jdev_top->num_links; i1++) {
++		for (i2 = 0; i2 < num_lnk_attrs; i2++) {
++			jattr = &jesd204_lnk_attrs[i2];
++			attr = &(lnkattrs[lnkattr_idx].attr);
++			attr->mode = 0644;
++			attr->name = devm_kasprintf(parent, GFP_KERNEL,
++						    "link%d_%s", i1,
++						    jattr->name);
++			if (!attr->name)
++				return ERR_PTR(-ENOMEM);
++			lnkattrs[lnkattr_idx].show = jesd204_link_show;
++			lnkattrs[lnkattr_idx].store = jesd204_link_store;
++			lnkattr_idx++;
++		}
++	}
++
++	return lnkattrs;
++}
++
++int jesd204_dev_create_sysfs(struct jesd204_dev *jdev)
++{
++	struct device_attribute *conattrs, *lnkattrs;
++	struct device *parent = jdev->dev.parent;
++	int i1, i2, conattrs_count, attrs_count;
++	int topattrs_count, lnkattrs_count;
++	struct attribute **attrs;
++
++	conattrs = jesd204_dev_create_con_attrs(jdev, &conattrs_count);
++	if (IS_ERR(conattrs))
++		return PTR_ERR(conattrs);
++
++	lnkattrs = jesd204_dev_create_lnk_attrs(jdev, &lnkattrs_count);
++	if (IS_ERR(lnkattrs))
++		return PTR_ERR(lnkattrs);
++
++	if (jdev->is_top)
++		topattrs_count = ARRAY_SIZE(jesd204_top_static_attributes);
++	else
++		topattrs_count = 0;
++
++	/* +1 for the NULL pointer at the end */
++	attrs_count = ARRAY_SIZE(jesd204_static_attributes);
++	attrs_count += topattrs_count + conattrs_count + lnkattrs_count + 1;
++	attrs = devm_kcalloc(parent, attrs_count, sizeof(*attrs),
++			     GFP_KERNEL);
++	if (!attrs)
++		return -ENOMEM;
++
++	/* copy the static attributes */
++	for (i1 = 0; i1 < ARRAY_SIZE(jesd204_static_attributes); i1++)
++		attrs[i1] = jesd204_static_attributes[i1];
++
++	for (i2 = 0; i2 < topattrs_count; i1++, i2++)
++		attrs[i1] = jesd204_top_static_attributes[i2];
++
++	for (i2 = 0; i2 < lnkattrs_count; i1++, i2++)
++		attrs[i1] = &(lnkattrs[i2].attr);
++
++	for (i2 = 0; i2 < conattrs_count; i1++, i2++)
++		attrs[i1] = &(conattrs[i2].attr);
++
++	jdev->sysfs_attr_group.attrs = attrs;
++
++	return sysfs_create_group(&jdev->dev.kobj, &jdev->sysfs_attr_group);
++}
++
++void jesd204_dev_destroy_sysfs(struct jesd204_dev *jdev)
++{
++	sysfs_remove_group(&jdev->dev.kobj, &jdev->sysfs_attr_group);
++}
+diff --git a/drivers/jesd204/jesd204_top_device.c b/drivers/jesd204/jesd204_top_device.c
+new file mode 100644
+index 000000000..928afb547
+--- /dev/null
++++ b/drivers/jesd204/jesd204_top_device.c
+@@ -0,0 +1,398 @@
++// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
++/*
++ * JESD204 Generic TOP device implementation
++ *
++ * Copyright 2021 Analog Devices Inc.
++ */
++
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of_device.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++
++#define JESD204_OF_PREFIX	"adi,"
++#include <linux/jesd204/jesd204.h>
++#include <linux/jesd204/jesd204-of.h>
++
++#define JESD204_TOP_DEVICE_MAX_NUM_LINKS	16
++
++struct jesd204_top_device_data {
++	struct device *dev;
++	struct jesd204_dev *jdev;
++	struct jesd204_dev_data	jesd204_dev_data;
++	struct mutex lock; /* Protect against concurrent accesses to the device */
++	struct jesd204_link links[JESD204_TOP_DEVICE_MAX_NUM_LINKS];
++	bool link_init_done;
++	u32 d; /* dummy */
++};
++
++static int jes204_parse_jesd_link_dt(struct jesd204_top_device_data *tdev,
++				     struct device_node *np,
++				     struct jesd204_link *link)
++{
++	struct device *dev = tdev->dev;
++	int ret;
++
++	JESD204_LNK_READ_DEVICE_ID(dev, np, link, &tdev->d, 0);
++	JESD204_LNK_READ_OCTETS_PER_FRAME(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_FRAMES_PER_MULTIFRAME(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_SAMPLES_PER_CONVERTER_PER_FRAME(dev, np, link,
++		&tdev->d, -1);
++	JESD204_LNK_READ_HIGH_DENSITY(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_CONVERTER_RESOLUTION(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_BITS_PER_SAMPLE(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_NUM_CONVERTERS(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_CTRL_BITS_PER_SAMPLE(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_NUM_LANES(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_VERSION(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_SUBCLASS(dev, np, link, &tdev->d, -1);
++	JESD204_LNK_READ_SCRAMBLING(dev, np, link, &tdev->d, 1);
++
++	ret = of_property_read_u64(np, JESD204_OF_PREFIX "sample-rate",
++		&link->sample_rate);
++	if (ret || !link->sample_rate) {
++		dev_err(dev, "Missing DT prop '%s' @ line %d ",
++			JESD204_OF_PREFIX "sample-rate", __LINE__);
++		return -EINVAL;
++	}
++
++	ret = of_property_read_u32(np, JESD204_OF_PREFIX "sample-rate-div",
++		&link->sample_rate_div);
++	if (ret)
++		link->sample_rate_div = 1;
++
++	return 0;
++}
++
++static int jesd204_link_init(struct jesd204_dev *jdev,
++		enum jesd204_state_op_reason reason,
++		struct jesd204_link *lnk)
++{
++	struct device *dev = jesd204_dev_to_device(jdev);
++	struct jesd204_top_device_data *tdev = dev_get_drvdata(dev);
++
++	if (reason != JESD204_STATE_OP_REASON_INIT)
++		return JESD204_STATE_CHANGE_DONE;
++
++	dev_dbg(dev, "%s:%d link_num %u reason %s\n", __func__, __LINE__,
++		lnk->link_id, jesd204_state_op_reason_str(reason));
++
++	if (lnk->link_id > JESD204_TOP_DEVICE_MAX_NUM_LINKS)
++		return -EFAULT;
++
++	if (!tdev->links[lnk->link_id].num_lanes)
++		return -EFAULT;
++
++	jesd204_copy_link_params(lnk, &tdev->links[lnk->link_id]);
++
++	lnk->sample_rate = tdev->links[lnk->link_id].sample_rate;
++	lnk->sample_rate_div = tdev->links[lnk->link_id].sample_rate_div;
++
++	if (lnk->jesd_version == JESD204_VERSION_C)
++		lnk->jesd_encoder = JESD204_ENCODER_64B66B;
++	else
++		lnk->jesd_encoder = JESD204_ENCODER_8B10B;
++
++	return JESD204_STATE_CHANGE_DONE;
++}
++
++static int jesd204_link_post_running(struct jesd204_dev *jdev,
++		enum jesd204_state_op_reason reason,
++		struct jesd204_link *lnk)
++{
++	struct device *dev = jesd204_dev_to_device(jdev);
++	struct jesd204_top_device_data *tdev = dev_get_drvdata(dev);
++
++	dev_dbg(dev, "%s:%d link_num %u reason %s\n", __func__, __LINE__,
++		lnk->link_id, jesd204_state_op_reason_str(reason));
++
++	if (lnk->link_id > JESD204_TOP_DEVICE_MAX_NUM_LINKS)
++		return -EFAULT;
++
++	WRITE_ONCE(tdev->link_init_done, reason == JESD204_STATE_OP_REASON_INIT);
++
++	return JESD204_STATE_CHANGE_DONE;
++}
++
++static ssize_t jesd204_fsm_error_show(struct device *dev,
++				 struct device_attribute *attr,
++				 char *buf)
++{
++	struct jesd204_top_device_data *tdev = dev_get_drvdata(dev);
++	struct jesd204_link *links[JESD204_TOP_DEVICE_MAX_NUM_LINKS];
++	int i, err, num_links, ret;
++
++	if (!tdev->jdev)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&tdev->lock);
++
++	num_links = jesd204_get_active_links_num(tdev->jdev);
++	if (num_links < 0) {
++		ret = num_links;
++		goto out;
++	}
++
++	ret = jesd204_get_links_data(tdev->jdev, links, num_links);
++	if (ret)
++		goto out;
++
++	err = 0;
++	for (i = 0; i < num_links; i++) {
++		if (links[i]->error) {
++			err = links[i]->error;
++			break;
++		}
++	}
++
++	ret = sysfs_emit(buf, "%d\n", err);
++out:
++	mutex_unlock(&tdev->lock);
++
++	return ret;
++}
++
++static ssize_t jesd204_fsm_paused_show(struct device *dev,
++				 struct device_attribute *attr,
++				 char *buf)
++{
++	struct jesd204_top_device_data *tdev = dev_get_drvdata(dev);
++	struct jesd204_link *links[JESD204_TOP_DEVICE_MAX_NUM_LINKS];
++	int i, num_links, ret;
++	bool paused;
++
++	if (!tdev->jdev)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&tdev->lock);
++
++	num_links = jesd204_get_active_links_num(tdev->jdev);
++	if (num_links < 0) {
++		ret = num_links;
++		goto out;
++	}
++	ret = jesd204_get_links_data(tdev->jdev, links, num_links);
++	if (ret)
++		goto out;
++	/*
++	 * Take the slowest link; if there are N links and one is paused, all are paused.
++	 * Not sure if this can happen yet, but best design it like this here.
++	 */
++
++	paused = false;
++	for (i = 0; i < num_links; i++) {
++		if (jesd204_link_get_paused(links[i])) {
++			paused = true;
++			break;
++		}
++	}
++
++	ret = sysfs_emit(buf, "%d\n", paused);
++out:
++	mutex_unlock(&tdev->lock);
++
++	return ret;
++}
++
++static ssize_t jesd204_fsm_state_show(struct device *dev,
++				 struct device_attribute *attr,
++				 char *buf)
++{
++	struct jesd204_top_device_data *tdev = dev_get_drvdata(dev);
++	struct jesd204_link *links[JESD204_TOP_DEVICE_MAX_NUM_LINKS];
++	int num_links, ret;
++
++	if (!tdev->jdev)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&tdev->lock);
++
++	num_links = jesd204_get_active_links_num(tdev->jdev);
++	if (num_links < 0) {
++		ret = num_links;
++		goto out;
++	}
++
++	ret = jesd204_get_links_data(tdev->jdev, links, num_links);
++	if (ret)
++		goto out;
++
++	ret = sysfs_emit(buf, "%s\n", jesd204_link_get_state_str(links[0]));
++out:
++	mutex_unlock(&tdev->lock);
++
++	return ret;
++}
++
++static ssize_t jesd204_fsm_ctrl_show(struct device *dev,
++				 struct device_attribute *attr,
++				 char *buf)
++{
++	struct jesd204_top_device_data *tdev = dev_get_drvdata(dev);
++
++	if (!tdev->jdev)
++		return -EOPNOTSUPP;
++
++	return sysfs_emit(buf, "%d\n", READ_ONCE(tdev->link_init_done));
++}
++
++static ssize_t jesd204_fsm_ctrl_store(struct device *dev,
++				  struct device_attribute *attr,
++				  const char *buf, size_t len)
++{
++	struct jesd204_top_device_data *tdev = dev_get_drvdata(dev);
++	int ret;
++	bool enable;
++
++	if (!tdev->jdev)
++		return -EOPNOTSUPP;
++
++	ret = strtobool(buf, &enable);
++	if (ret)
++		return ret;
++
++	mutex_lock(&tdev->lock);
++	if (enable) {
++		jesd204_fsm_stop(tdev->jdev, JESD204_LINKS_ALL);
++		jesd204_fsm_clear_errors(tdev->jdev, JESD204_LINKS_ALL);
++		ret = jesd204_fsm_start(tdev->jdev, JESD204_LINKS_ALL);
++	} else {
++		jesd204_fsm_stop(tdev->jdev, JESD204_LINKS_ALL);
++		jesd204_fsm_clear_errors(tdev->jdev, JESD204_LINKS_ALL);
++		ret = 0;
++	}
++	mutex_unlock(&tdev->lock);
++
++	return ret ? ret : len;
++}
++
++static ssize_t jesd204_fsm_resume_store(struct device *dev,
++				  struct device_attribute *attr,
++				  const char *buf, size_t len)
++{
++	struct jesd204_top_device_data *tdev = dev_get_drvdata(dev);
++	int ret;
++	bool enable;
++
++	if (!tdev->jdev)
++		return -EOPNOTSUPP;
++
++	ret = strtobool(buf, &enable);
++	if (ret)
++		return ret;
++
++	if (!enable)
++		return 0;
++
++	mutex_lock(&tdev->lock);
++	ret = jesd204_fsm_resume(tdev->jdev, JESD204_LINKS_ALL);
++	mutex_unlock(&tdev->lock);
++
++	return ret ? ret : len;
++}
++
++static DEVICE_ATTR_RO(jesd204_fsm_error);
++static DEVICE_ATTR_RO(jesd204_fsm_paused);
++static DEVICE_ATTR_RO(jesd204_fsm_state);
++static DEVICE_ATTR_WO(jesd204_fsm_resume);
++static DEVICE_ATTR_RW(jesd204_fsm_ctrl);
++
++static struct attribute *jesd204_fsm_attributes[] = {
++	&dev_attr_jesd204_fsm_error.attr,
++	&dev_attr_jesd204_fsm_state.attr,
++	&dev_attr_jesd204_fsm_paused.attr,
++	&dev_attr_jesd204_fsm_resume.attr,
++	&dev_attr_jesd204_fsm_ctrl.attr,
++	NULL,
++};
++
++static const struct attribute_group jesd204_fsm_attributes_group = {
++	.attrs = jesd204_fsm_attributes,
++};
++
++/* Match table for of_platform binding */
++static const struct of_device_id jesd204_top_device_of_match[] = {
++	{ .compatible = "adi,jesd204-top-device-1.0", },
++	{},
++};
++MODULE_DEVICE_TABLE(of, jesd204_top_device_of_match);
++
++static int jesd204_top_device_probe(struct platform_device *pdev)
++{
++	struct jesd204_top_device_data *tdev;
++	struct jesd204_dev *jdev;
++	struct device_node *of_links, *of_link;
++	int ret;
++	u32 reg;
++
++	if (!pdev->dev.of_node)
++		return -ENODEV;
++
++	tdev = devm_kzalloc(&pdev->dev, sizeof(*tdev), GFP_KERNEL);
++	if (!tdev)
++		return -ENOMEM;
++
++	tdev->dev = &pdev->dev;
++
++	of_links = of_get_child_by_name(pdev->dev.of_node, "adi,jesd-links");
++	if (!of_links)
++		return -ENODEV;
++
++	for_each_child_of_node(of_links, of_link) {
++		ret = of_property_read_u32(of_link, "reg", &reg);
++		if (ret || (!ret && reg >= JESD204_TOP_DEVICE_MAX_NUM_LINKS)) {
++			dev_err(&pdev->dev, "Missing or invalid DT prop 'reg'\n");
++			of_node_put(of_link);
++			of_node_put(of_links);
++			return -EINVAL;
++		}
++		ret = jes204_parse_jesd_link_dt(tdev, of_link, &tdev->links[reg]);
++		if (!ret)
++			tdev->jesd204_dev_data.max_num_links++;
++	}
++
++	of_node_put(of_links);
++
++	tdev->jesd204_dev_data.state_ops[JESD204_OP_LINK_INIT].per_link =
++		jesd204_link_init;
++	tdev->jesd204_dev_data.state_ops[JESD204_OP_OPT_POST_RUNNING_STAGE].per_link =
++		jesd204_link_post_running;
++
++	dev_set_drvdata(&pdev->dev, tdev);
++	mutex_init(&tdev->lock);
++
++	jdev = devm_jesd204_dev_register(&pdev->dev, &tdev->jesd204_dev_data);
++	if (IS_ERR(jdev))
++		return PTR_ERR(jdev);
++
++	tdev->jdev = jdev;
++
++	ret = devm_device_add_group(&pdev->dev, &jesd204_fsm_attributes_group);
++	if (ret != 0) {
++		dev_err(&pdev->dev,
++			"Failed to create attribute group: %d\n", ret);
++		return ret;
++	}
++
++	dev_info(&pdev->dev, "JESD204-GENERIC-TOP-DEVICE probed %d links\n",
++		tdev->jesd204_dev_data.max_num_links);
++
++	return jesd204_fsm_start(jdev, JESD204_LINKS_ALL);
++}
++
++static struct platform_driver jesd204_top_device_driver = {
++	.driver = {
++		.name = KBUILD_MODNAME,
++		.of_match_table = jesd204_top_device_of_match,
++	},
++	.probe = jesd204_top_device_probe,
++};
++module_platform_driver(jesd204_top_device_driver);
++
++MODULE_AUTHOR("Michael Hennerich <michael.hennerich@analog.com>");
++MODULE_DESCRIPTION("Generic jesd204 top-device");
++MODULE_LICENSE("Dual BSD/GPL");
+diff --git a/include/dt-bindings/jesd204/adxcvr.h b/include/dt-bindings/jesd204/adxcvr.h
+new file mode 100644
+index 000000000..628f3729d
+--- /dev/null
++++ b/include/dt-bindings/jesd204/adxcvr.h
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Copyright (c) 2020 Analog Devices, Inc.
++ */
++
++#ifndef _DT_BINDINGS_JESD204_ADXCVR_H
++#define _DT_BINDINGS_JESD204_ADXCVR_H
++
++/*
++ * adi,sys-clk-select
++ */
++#define XCVR_CPLL		0 /* CPLL: GTHE3, GTHE4, GTYE4, GTXE2 */
++#define XCVR_QPLL1		2 /* QPLL1: GTHE3, GTHE4, GTYE4 */
++#define XCVR_QPLL		3 /* QPLL0: GTHE3, GTHE4, GTYE4, GTXE2 */
++
++/*
++ * adi,out-clk-select
++ */
++#define XCVR_OUTCLK_PCS		1
++#define XCVR_OUTCLK_PMA		2
++#define XCVR_REFCLK		3
++#define XCVR_REFCLK_DIV2	4
++#define XCVR_PROGDIV_CLK	5 /* GTHE3, GTHE4, GTYE4 only */
++
++#endif /* _DT_BINDINGS_JESD204_ADXCVR_H */
++
+diff --git a/include/dt-bindings/jesd204/device-states.h b/include/dt-bindings/jesd204/device-states.h
+new file mode 100644
+index 000000000..aa197b20e
+--- /dev/null
++++ b/include/dt-bindings/jesd204/device-states.h
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Copyright (c) 2020 Analog Devices, Inc.
++ */
++
++#ifndef _DT_BINDINGS_JESD204_DEVICE_STATE_H
++#define _DT_BINDINGS_JESD204_DEVICE_STATE_H
++
++/* These *MUST* be in a monotonic order */
++#define JESD204_FSM_STATE_DEVICE_INIT			0
++#define JESD204_FSM_STATE_LINK_INIT			1
++#define JESD204_FSM_STATE_LINK_SUPPORTED		2
++#define JESD204_FSM_STATE_LINK_PRE_SETUP		3
++#define JESD204_FSM_STATE_CLK_SYNC_STAGE1		4
++#define JESD204_FSM_STATE_CLK_SYNC_STAGE2		5
++#define JESD204_FSM_STATE_CLK_SYNC_STAGE3		6
++#define JESD204_FSM_STATE_LINK_SETUP			7
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE1		8
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE2		9
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE3		10
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE4		11
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE5		12
++#define JESD204_FSM_STATE_CLOCKS_ENABLE			13
++#define JESD204_FSM_STATE_LINK_ENABLE			14
++#define JESD204_FSM_STATE_LINK_RUNNING			15
++#define JESD204_FSM_STATE_OPT_POST_RUNNING_STAGE	16
++
++/* Update this when adding states */
++#define JESD204_FSM_STATE_LAST			(JESD204_FSM_STATE_OPT_POST_RUNNING_STAGE)
++
++#define JESD204_FSM_STATES_NUM			(JESD204_FSM_STATE_LAST + 1)
++
++#endif /* _DT_BINDINGS_JESD204_DEVICE_STATE_H */
+diff --git a/include/linux/jesd204/adi-common.h b/include/linux/jesd204/adi-common.h
+new file mode 100644
+index 000000000..3ca251d39
+--- /dev/null
++++ b/include/linux/jesd204/adi-common.h
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Analog Devices common definitions for JESD204 IP cores
++ *
++ * Copyright 2020 Analog Devices Inc.
++ *
++ * https://wiki.analog.com/resources/fpga/docs/axi_ip
++ * https://wiki.analog.com/resources/fpga/docs/hdl/regmap
++ * https://wiki.analog.com/resources/fpga/peripherals/jesd204/jesd204_tpl_adc
++ * https://wiki.analog.com/resources/fpga/peripherals/jesd204/jesd204_tpl_dac
++ */
++#ifndef _ADI_JESD204_H_
++#define _ADI_JESD204_H_
++
++/* JESD TPL COMMON */
++
++#define ADI_JESD204_REG_TPL_CNTRL		0x0200
++#define ADI_JESD204_REG_TPL_STATUS		0x0204
++#define ADI_JESD204_REG_TPL_DESCRIPTOR_1	0x0240
++#define ADI_JESD204_REG_TPL_DESCRIPTOR_2	0x0244
++
++#define ADI_JESD204_TPL_TO_M(x)			(((x) >> 0) & 0xFF)
++#define ADI_JESD204_TPL_TO_L(x)			(((x) >> 8) & 0xFF)
++#define ADI_JESD204_TPL_TO_S(x)			(((x) >> 16) & 0xFF)
++#define ADI_JESD204_TPL_TO_F(x)			(((x) >> 24) & 0xFF)
++
++#define ADI_JESD204_TPL_TO_N(x)			(((x) >> 0) & 0xFF)
++#define ADI_JESD204_TPL_TO_NP(x)		(((x) >> 8) & 0xFF)
++
++#define ADI_JESD204_TPL_TO_PROFILE_NUM(x)	(((x) >> 0) & 0xF)
++#define ADI_JESD204_PROFILE_SEL(x)		((x) & 0xF)
++
++#endif
+diff --git a/include/linux/jesd204/jesd204-of.h b/include/linux/jesd204/jesd204-of.h
+new file mode 100644
+index 000000000..bcd5fbb11
+--- /dev/null
++++ b/include/linux/jesd204/jesd204-of.h
+@@ -0,0 +1,98 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/**
++ * The JESD204 framework OF helpers
++ *
++ * Copyright (c) 2020 Analog Devices Inc.
++ */
++#ifndef _JESD204_OF_H_
++#define _JESD204_OF_H_
++
++#ifndef JESD204_OF_PREFIX
++#define JESD204_OF_PREFIX	"jesd204-"
++#endif
++
++/**
++ * Note: usually macros should not define control follows, but other methods
++ * can cause insanity.
++ */
++
++#define _JESD204_LNK_READ_PROP(dev, np, sprop, link, field, alt, dflt)	\
++{									\
++	int ret;							\
++	u32 tmp;							\
++									\
++	ret = of_property_read_u32(np, JESD204_OF_PREFIX sprop, &tmp);	\
++	if (ret) {							\
++		if (dflt < 0) {						\
++			dev_err(dev, "Missing DT prop '%s' @ line %d ",	\
++				JESD204_OF_PREFIX sprop, __LINE__);	\
++			return -EINVAL;					\
++		}							\
++		tmp = dflt;						\
++	}								\
++	(link)->field = tmp;						\
++	if (alt)							\
++		*(alt) = tmp;						\
++}
++
++#define JESD204_LNK_READ_DEVICE_ID(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "device-id", link, device_id, alt, dflt)
++
++#define JESD204_LNK_READ_BANK_ID(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "bank-id", link, bank_id, alt, dflt)
++
++#define JESD204_LNK_READ_NUM_LANES(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "lanes-per-device", link, num_lanes, alt, dflt)
++
++#define JESD204_LNK_READ_NUM_CONVERTERS(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "converters-per-device", link, num_converters, alt, dflt)
++
++#define JESD204_LNK_READ_OCTETS_PER_FRAME(dev, np, link, alt, dflt)	\
++	_JESD204_LNK_READ_PROP(dev, np, "octets-per-frame", link, octets_per_frame, alt, dflt)
++
++#define JESD204_LNK_READ_FRAMES_PER_MULTIFRAME(dev, np, link, alt, dflt)	\
++	_JESD204_LNK_READ_PROP(dev, np, "frames-per-multiframe", link, frames_per_multiframe, alt, dflt)
++
++#define JESD204_LNK_READ_NUM_OF_MULTIBLOCKS_IN_EMB(dev, np, link, alt, dflt)	\
++	_JESD204_LNK_READ_PROP(dev, np, "num-multiblocks-in-emb", link, num_of_multiblocks_in_emb, alt, dflt)
++
++#define JESD204_LNK_READ_BITS_PER_SAMPLE(dev, np, link, alt, dflt)	\
++	_JESD204_LNK_READ_PROP(dev, np, "bits-per-sample", link, bits_per_sample, alt, dflt)
++
++#define JESD204_LNK_READ_CONVERTER_RESOLUTION(dev, np, link, alt, dflt)	\
++	_JESD204_LNK_READ_PROP(dev, np, "converter-resolution", link, converter_resolution, alt, dflt)
++
++#define JESD204_LNK_READ_SCRAMBLING(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "scrambling", link, scrambling, alt, dflt)
++
++#define JESD204_LNK_READ_ENCODING(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "encoding", link, jesd_encoder, alt, dflt)
++
++#define JESD204_LNK_READ_HIGH_DENSITY(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "high-density", link, high_density, alt, dflt)
++
++#define JESD204_LNK_READ_VERSION(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "version", link, jesd_version, alt, dflt)
++
++#define JESD204_LNK_READ_SUBCLASS(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "subclass", link, subclass, alt, dflt)
++
++#define JESD204_LNK_READ_CTRL_WORDS_PER_FRAME_CLK(dev, np, link, alt, dflt)	\
++	_JESD204_LNK_READ_PROP(dev, np, "control-words-per-frame-clk", link, ctrl_words_per_frame_clk, alt, dflt)
++
++#define JESD204_LNK_READ_CTRL_BITS_PER_SAMPLE(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "control-bits-per-sample", link, ctrl_bits_per_sample, alt, dflt)
++
++#define JESD204_LNK_READ_SAMPLES_PER_CONVERTER_PER_FRAME(dev, np, link, alt, dflt)		\
++	_JESD204_LNK_READ_PROP(dev, np, "samples-per-converter-per-frame", link, samples_per_conv_frame, alt, dflt)
++
++#define JESD204_LNK_READ_DAC_ADJ_RESOLUTION_STEPS(dev, np, link, alt, dflt)	\
++	_JESD204_LNK_READ_PROP(dev, np, "dac-adj-resolution-steps", link, dac_adj_resolution_steps, alt, dflt)
++
++#define JESD204_LNK_READ_DAC_ADJ_DIRECTION(dev, np, link, alt, dflt)	\
++	_JESD204_LNK_READ_PROP(dev, np, "dac-adj-direction", link, dac_adj_direction, alt, dflt)
++
++#define JESD204_LNK_READ_DAC_ADJ_PHASE_ADJ(dev, np, link, alt, dflt)	\
++	_JESD204_LNK_READ_PROP(dev, np, "dac-phase-adjust", link, dac_phase_adj, alt, dflt)
++
++#endif /* _JESD204_OF_H_ */
+diff --git a/include/linux/jesd204/jesd204.h b/include/linux/jesd204/jesd204.h
+new file mode 100644
+index 000000000..b24c1a8a1
+--- /dev/null
++++ b/include/linux/jesd204/jesd204.h
+@@ -0,0 +1,432 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/**
++ * The JESD204 framework
++ *
++ * Copyright (c) 2019 Analog Devices Inc.
++ */
++#ifndef _JESD204_H_
++#define _JESD204_H_
++
++#include <linux/kern_levels.h>
++#include <dt-bindings/jesd204/device-states.h>
++
++struct jesd204_dev;
++
++enum jesd204_subclass {
++	JESD204_SUBCLASS_0,
++	JESD204_SUBCLASS_1,
++	JESD204_SUBCLASS_2,
++};
++
++enum jesd204_version {
++	JESD204_VERSION_A,
++	JESD204_VERSION_B,
++	JESD204_VERSION_C,
++};
++
++/* JESD204C Supported encoding scheme */
++enum jesd204_encoder {
++	JESD204_ENCODER_UNKNOWN,
++	JESD204_ENCODER_8B10B,
++	JESD204_ENCODER_64B66B,
++	JESD204_ENCODER_64B80B,
++
++	JESD204_ENCODER_MAX
++};
++
++enum jesd204_sysref_mode {
++	JESD204_SYSREF_DISABLED,
++	JESD204_SYSREF_CONTINUOUS,
++	JESD204_SYSREF_ONESHOT,
++};
++
++enum jesd204_state_change_result {
++	JESD204_STATE_CHANGE_ERROR = -1,
++	JESD204_STATE_CHANGE_DEFER = 0,
++	JESD204_STATE_CHANGE_DONE,
++};
++
++#define JESD204_LINKS_ALL		((unsigned int)(-1))
++
++#define JESD204_LMFC_OFFSET_UNINITIALIZED	((u16)-1)
++
++/** struct jesd204_sysref - JESD204 parameters for SYSREF
++ * @mode:			SYSREF mode (see @jesd204_sysref_mode)
++ * @capture_falling_edge:	true if it should capture falling edge
++ * @valid_falling_edge:		true if falling edge should be valid
++ * @lmfc_offset:		offset for LMFC
++ */
++struct jesd204_sysref {
++	enum jesd204_sysref_mode	mode;
++	u8				capture_falling_edge;
++	u8				valid_falling_edge;
++	u16				lmfc_offset;
++};
++
++/**
++ * struct jesd204_link - JESD204 link configuration settings
++ * @link_id:			JESD204 link ID provided via DT configuration
++ * @error:			error code for this JESD204 link
++ * @is_transmit:		true if this link is transmit (digital to analog)
++ * @sample_rate:		sample rate for the link
++ * @sample_rate_div:		optional sample rate divider for the link
++ * 					final rate = sample_rate / sample_rate_div
++ * @num_lanes:			number of JESD204 lanes (L)
++ * @num_converters:		number of converters per link (M)
++ * @octets_per_frame:		number of octets per frame (F)
++ * @frames_per_multiframe:	number of frames per frame (K)
++ * @num_of_multiblocks_in_emb:	number of multiblocks in extended multiblock (E) (JESD204C)
++ * @bits_per_sample:		number of bits per sample (N')
++ * @converter_resolution:	converter resolution (N)
++ * @jesd_version:		JESD204 version (A, B or C) (JESDV)
++ * @jesd_encoder:		JESD204C encoder (8B10B, 64B66B, 64B80B)
++ * @subclass:			JESD204 subclass (0,1 or 2) (SUBCLASSV)
++ * @device_id:			device ID (DID)
++ * @bank_id:			bank ID (BID)
++ * @scrambling:			true if scrambling enabled (SCR)
++ * @high_density:		true if high-density format is used (HD)
++ * @ctrl_words_per_frame_clk:	number of control words per frame clock
++ *				period (CF)
++ * @ctrl_bits_per_sample:	number of control bits per sample (CS)
++ * @samples_per_conv_frame:	number of samples per converter per frame
++ *				cycle (S)
++ * @lane_ids:			array of lane IDs (LID); note that this is an
++ *				array the size of @num_lanes
++ * @sysref:			JESD204 sysref config, see @jesd204_sysref
++ * @dac_adj_resolution_steps:	number of adjustment resolution steps to adjust
++ *				DAC LMFC (ADJCNT) - Subclass 2 only
++ * @dac_adj_direction:		direction to adjust DAC LMFC (ADJDIR)
++ *				Subclass 2 only
++ * @dac_phase_adj:		true to do phase adjustment request to DAC
++ *				Subclass 2 only
++ */
++struct jesd204_link {
++	u32 link_id;
++	int error;
++
++	u64 sample_rate;
++	u32 sample_rate_div;
++
++	bool is_transmit;
++
++	u8 num_lanes;
++	u8 num_converters;
++	u8 octets_per_frame;
++	u16 frames_per_multiframe;
++	u8 num_of_multiblocks_in_emb; /* E */
++
++	u8 bits_per_sample;
++
++	u8 converter_resolution;
++	u8 jesd_version;
++	u8 jesd_encoder;
++	u8 subclass;
++
++	u8 device_id;
++	u8 bank_id;
++
++	u8 scrambling;
++	u8 high_density;
++
++	u8 ctrl_words_per_frame_clk;
++	u8 ctrl_bits_per_sample;
++	u8 samples_per_conv_frame;
++
++	u8 *lane_ids;
++
++	struct jesd204_sysref sysref;
++
++	/* Subclass 2 only */
++	u8 dac_adj_resolution_steps;
++	u8 dac_adj_direction;
++	u8 dac_phase_adj;
++};
++
++enum jesd204_state_op_reason {
++	JESD204_STATE_OP_REASON_INIT,
++	JESD204_STATE_OP_REASON_UNINIT,
++};
++
++static inline const char *jesd204_encoder_str(enum jesd204_encoder enc)
++{
++	switch (enc) {
++	case JESD204_ENCODER_8B10B:
++		return "8b10b";
++	case JESD204_ENCODER_64B66B:
++		return "64b66b";
++	case JESD204_ENCODER_64B80B:
++		return "64b80b";
++	default:
++		return "unknown";
++	}
++}
++
++static inline const char *jesd204_state_op_reason_str(enum jesd204_state_op_reason reason)
++{
++	switch (reason) {
++	case JESD204_STATE_OP_REASON_INIT:
++		return "initialization";
++	case JESD204_STATE_OP_REASON_UNINIT:
++		return "uninitialization";
++	default:
++		return "unknown";
++	}
++}
++
++typedef int (*jesd204_sysref_cb)(struct jesd204_dev *jdev);
++
++typedef int (*jesd204_dev_cb)(struct jesd204_dev *jdev,
++			      enum jesd204_state_op_reason reason);
++
++typedef int (*jesd204_link_cb)(struct jesd204_dev *jdev,
++			       enum jesd204_state_op_reason,
++			       struct jesd204_link *lnk);
++
++typedef void (*jesd204_fsm_finished_cb)(struct jesd204_dev *jdev,
++					const struct jesd204_link * const *links,
++					unsigned int num_links);
++
++enum jesd204_state_op_mode {
++	JESD204_STATE_OP_MODE_PER_LINK,
++	JESD204_STATE_OP_MODE_PER_DEVICE,
++};
++
++/**
++ * struct jesd204_state_op - JESD204 device per-state op
++ * @mode:		mode for this state op, depending on this @per_device or @per_link is called
++ * @per_device:		op called for each JESD204 **device** during a transition
++ * @per_link		op called for each JESD204 **link** individually during a transition
++ * // FIXME: maybe pass 'struct jesd204_sysref' for post_state_sysref, to make this configurable? we'll see later
++ * // FIXME: for now, the device should also be a top-level device, in case of multi-chip setups
++ * @post_state_sysref:	true if a SYSREF should be issued after the state change
++ */
++struct jesd204_state_op {
++	enum jesd204_state_op_mode	mode;
++	jesd204_dev_cb			per_device;
++	jesd204_link_cb			per_link;
++	bool				post_state_sysref;
++};
++
++enum jesd204_dev_op {
++	JESD204_OP_DEVICE_INIT,
++	JESD204_OP_LINK_INIT,
++	JESD204_OP_LINK_SUPPORTED,
++	JESD204_OP_LINK_PRE_SETUP,
++	JESD204_OP_CLK_SYNC_STAGE1,
++	JESD204_OP_CLK_SYNC_STAGE2,
++	JESD204_OP_CLK_SYNC_STAGE3,
++	JESD204_OP_LINK_SETUP,
++	JESD204_OP_OPT_SETUP_STAGE1,
++	JESD204_OP_OPT_SETUP_STAGE2,
++	JESD204_OP_OPT_SETUP_STAGE3,
++	JESD204_OP_OPT_SETUP_STAGE4,
++	JESD204_OP_OPT_SETUP_STAGE5,
++	JESD204_OP_CLOCKS_ENABLE,
++	JESD204_OP_LINK_ENABLE,
++	JESD204_OP_LINK_RUNNING,
++	JESD204_OP_OPT_POST_RUNNING_STAGE,
++
++	__JESD204_MAX_OPS,
++};
++
++/**
++ * struct jesd204_dev_data - JESD204 device initialization data
++ * @sysref_cb:		SYSREF callback, if this device/driver supports it
++ * @fsm_finished_cb:	callback for when the FSM finishes a series of transitions
++ * @sizeof_priv:	amount of data to allocate for private information
++ * @links:		JESD204 initial link configuration
++ * @max_num_links:	maximum number of JESD204 links this device can support
++ * @num_retries:	number of retries in case of error (only for top-level device)
++ * @state_ops:		ops for each state transition of type @struct jesd204_state_op
++ */
++struct jesd204_dev_data {
++	jesd204_sysref_cb			sysref_cb;
++	jesd204_fsm_finished_cb			fsm_finished_cb;
++	size_t					sizeof_priv;
++	const struct jesd204_link		*links;
++	unsigned int				max_num_links;
++	unsigned int				num_retries;
++	struct jesd204_state_op			state_ops[__JESD204_MAX_OPS];
++};
++
++#ifdef CONFIG_JESD204
++
++struct jesd204_dev *devm_jesd204_dev_register(struct device *dev,
++					      const struct jesd204_dev_data *i);
++
++int jesd204_get_active_links_num(struct jesd204_dev *jdev);
++
++int jesd204_get_links_data(struct jesd204_dev *jdev,
++			   struct jesd204_link ** const links,
++			   const unsigned int num_links);
++
++int jesd204_fsm_start(struct jesd204_dev *jdev, unsigned int link_idx);
++void jesd204_fsm_stop(struct jesd204_dev *jdev, unsigned int link_idx);
++
++int jesd204_fsm_resume(struct jesd204_dev *jdev, unsigned int link_idx);
++
++void jesd204_fsm_clear_errors(struct jesd204_dev *jdev, unsigned int link_idx);
++
++struct device *jesd204_dev_to_device(struct jesd204_dev *jdev);
++struct jesd204_dev *jesd204_dev_from_device(struct device *dev);
++
++void *jesd204_dev_priv(struct jesd204_dev *jdev);
++
++int jesd204_link_get_lmfc_lemc_rate(struct jesd204_link *lnk,
++				    unsigned long *rate_hz);
++int jesd204_link_get_rate_khz(struct jesd204_link *lnk,
++				 unsigned long *lane_rate_khz);
++int jesd204_link_get_rate(struct jesd204_link *lnk, u64 *lane_rate_hz);
++int jesd204_link_get_device_clock(struct jesd204_link *lnk,
++				  unsigned long *device_clock);
++
++int jesd204_sysref_async(struct jesd204_dev *jdev);
++
++int jesd204_sysref_async_force(struct jesd204_dev *jdev);
++
++bool jesd204_dev_is_top(struct jesd204_dev *jdev);
++
++bool jesd204_link_get_paused(const struct jesd204_link *lnk);
++
++const char *jesd204_link_get_state_str(const struct jesd204_link *lnk);
++
++void jesd204_copy_link_params(struct jesd204_link *dst,
++			      const struct jesd204_link *src);
++
++#else /* !IS_ENABLED(CONFIG_JESD204) */
++
++static inline struct jesd204_dev *devm_jesd204_dev_register(
++		struct device *dev, const struct jesd204_dev_data *init)
++{
++	return NULL;
++}
++
++static inline int jesd204_get_active_links_num(struct jesd204_dev *jdev)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_get_links_data(struct jesd204_dev *jdev,
++					 struct jesd204_link * const *links,
++					 const unsigned int num_links)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_fsm_start(struct jesd204_dev *jdev,
++				    unsigned int link_idx)
++{
++	return 0;
++}
++
++static inline void jesd204_fsm_stop(struct jesd204_dev *jdev,
++				    unsigned int link_idx) {}
++
++static inline int jesd204_fsm_resume(struct jesd204_dev *jdev,
++				     unsigned int link_idx)
++{
++	return 0;
++}
++
++static inline void jesd204_fsm_clear_errors(struct jesd204_dev *jdev,
++					    unsigned int link_idx) {}
++
++static inline struct device *jesd204_dev_to_device(struct jesd204_dev *jdev)
++{
++	return NULL;
++}
++
++static inline struct jesd204_dev *jesd204_dev_from_device(struct device *dev)
++{
++	return NULL;
++}
++
++static inline void *jesd204_dev_priv(struct jesd204_dev *jdev)
++{
++	return NULL;
++}
++
++static inline int jesd204_link_get_lmfc_lemc_rate(struct jesd204_link *lnk,
++						  unsigned long *rate_hz)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_link_get_rate_khz(struct jesd204_link *lnk,
++					    unsigned long *lane_rate_khz)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_link_get_rate(struct jesd204_link *lnk,
++					u64 *lane_rate_hz)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_link_get_device_clock(struct jesd204_link *lnk,
++						unsigned long *device_clock)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_sysref_async(struct jesd204_dev *jdev)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_sysref_async_force(struct jesd204_dev *jdev)
++{
++	return -ENOTSUPP;
++}
++
++static inline bool jesd204_dev_is_top(struct jesd204_dev *jdev)
++{
++	return false;
++}
++
++static inline bool jesd204_link_get_paused(const struct jesd204_link *lnk)
++{
++	return false;
++}
++
++static inline const char *jesd204_link_get_state_str(const struct jesd204_link *lnk)
++{
++	return NULL;
++}
++
++static inline void jesd204_copy_link_params(struct jesd204_link *dst,
++					    const struct jesd204_link *src) {}
++
++#endif /* #ifdef CONFIG_JESD204 */
++
++#if defined(CONFIG_PRINTK) && defined(CONFIG_JESD204)
++
++__printf(3, 4)
++void jesd204_printk(const char *level, const struct jesd204_dev *jdev,
++		    const char *fmt, ...);
++#else
++
++static inline __printf(3, 4)
++void jesd204_printk(const char *level, const struct jesd204_dev *jdev,
++		    const char *fmt, ...)
++{}
++
++#endif /* #ifdef CONFIG_PRINTK */
++
++#define jesd204_emerg(dev, fmt, ...)					\
++	jesd204_printk(KERN_EMERG, dev, fmt, ##__VA_ARGS__)
++#define jesd204_crit(dev, fmt, ...)					\
++	jesd204_printk(KERN_CRIT, dev, fmt, ##__VA_ARGS__)
++#define jesd204_alert(dev, fmt, ...)					\
++	jesd204_printk(KERN_ALERT, dev, fmt, ##__VA_ARGS__)
++#define jesd204_err(dev, fmt, ...)					\
++	jesd204_printk(KERN_ERR, dev, fmt, ##__VA_ARGS__)
++#define jesd204_warn(dev, fmt, ...)					\
++	jesd204_printk(KERN_WARNING, dev, fmt, ##__VA_ARGS__)
++#define jesd204_notice(dev, fmt, ...)					\
++	jesd204_printk(KERN_NOTICE, dev, fmt, ##__VA_ARGS__)
++#define jesd204_info(dev, fmt, ...)					\
++	jesd204_printk(KERN_INFO, dev, fmt, ##__VA_ARGS__)
++
++#endif
+-- 
+2.51.0
+
