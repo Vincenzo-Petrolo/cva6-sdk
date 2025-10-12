@@ -1,0 +1,82 @@
+From 5d9d8a2dc87a87e5f237e8dd04cfc22b8605ce50 Mon Sep 17 00:00:00 2001
+From: Petrolo Vincenzo <s295043@studenti.polito.it>
+Date: Sun, 12 Oct 2025 15:02:43 +0200
+Subject: [PATCH] Fix hw_def.h
+
+---
+ drivers/hw_def.h | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/drivers/hw_def.h b/drivers/hw_def.h
+index d353372..9d77212 100644
+--- a/drivers/hw_def.h
++++ b/drivers/hw_def.h
+@@ -4,7 +4,6 @@
+ 
+ // #ifndef __HW_DEF_H_FILE__
+ // #define __HW_DEF_H_FILE__
+-const char *sdr_compatible_str = "sdr,sdr";
+ 
+ enum openwifi_hardware_type {
+   ZYNQ_AD9361 = 0,
+@@ -33,7 +32,6 @@ enum openwifi_band {
+ };
+ 
+ // ------------------------------------tx interface----------------------------------------
+-const char *tx_intf_compatible_str = "sdr,tx_intf";
+ 
+ #define TX_INTF_REG_MULTI_RST_ADDR                 (0*4)
+ #define TX_INTF_REG_ARBITRARY_IQ_ADDR              (1*4)
+@@ -75,9 +73,6 @@ enum tx_intf_mode {
+   TX_INTF_BW_20MHZ_AT_P_10MHZ_ANT1,
+ };
+ 
+-const int tx_intf_fo_mapping[] = {0, 0, 0, 0, 0, -10, 10, -10, 10};
+-const u32 dma_symbol_fifo_size_hw_queue[] = {4*1024, 4*1024, 4*1024, 4*1024}; // !!!make sure align to fifo in tx_intf_s_axis.v
+-
+ struct tx_intf_driver_api {
+   u32 (*hw_init)(enum tx_intf_mode mode, u32 tx_config, u32 num_dma_symbol_to_ps, enum openwifi_fpga_type fpga_type);
+ 
+@@ -133,7 +128,6 @@ struct tx_intf_driver_api {
+ };
+ 
+ // ------------------------------------rx interface----------------------------------------
+-const char *rx_intf_compatible_str = "sdr,rx_intf";
+ 
+ #define RX_INTF_REG_MULTI_RST_ADDR                 (0*4)
+ #define RX_INTF_REG_MIXER_CFG_ADDR                 (1*4)
+@@ -166,7 +160,6 @@ enum rx_intf_mode {
+   RX_INTF_BW_20MHZ_AT_P_10MHZ_ANT1,
+ };
+ 
+-const int rx_intf_fo_mapping[] = {0,0,0,0,-10,-10,10,10};
+ 
+ struct rx_intf_driver_api {
+   u32 io_start;
+@@ -209,7 +202,6 @@ struct rx_intf_driver_api {
+ };
+ 
+ // ----------------------------------openofdm rx-------------------------------
+-const char *openofdm_rx_compatible_str = "sdr,openofdm_rx";
+ 
+ #define OPENOFDM_RX_REG_MULTI_RST_ADDR     (0*4)
+ #define OPENOFDM_RX_REG_ENABLE_ADDR        (1*4)
+@@ -280,7 +272,6 @@ struct openofdm_rx_driver_api {
+ };
+ 
+ // ---------------------------------------openofdm tx-------------------------------
+-const char *openofdm_tx_compatible_str = "sdr,openofdm_tx";
+ 
+ #define OPENOFDM_TX_REG_MULTI_RST_ADDR                 (0*4)
+ #define OPENOFDM_TX_REG_INIT_PILOT_STATE_ADDR          (1*4)
+@@ -311,7 +302,6 @@ struct openofdm_tx_driver_api {
+ #define MY_BEACON          (1<<12)
+ #define MONITOR_ALL        (1<<13)
+ 
+-const char *xpu_compatible_str = "sdr,xpu";
+ 
+ #define XPU_REG_MULTI_RST_ADDR                (0*4)
+ #define XPU_REG_SRC_SEL_ADDR                  (1*4)
+-- 
+2.51.0
+

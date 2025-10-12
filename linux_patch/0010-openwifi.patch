@@ -1,15 +1,18 @@
-From d66a6369884ad48a550de4059aba7f0bcd52808a Mon Sep 17 00:00:00 2001
-From: Vincenzo Petrolo <vincenzo.petrolo@polito.it>
-Date: Fri, 10 Oct 2025 19:05:58 +0200
+From 3e08ea9bdd310c85897c9cd700948b8702ddad60 Mon Sep 17 00:00:00 2001
+From: Petrolo Vincenzo <s295043@studenti.polito.it>
+Date: Sun, 12 Oct 2025 13:35:00 +0200
 Subject: [PATCH] iio: adc: add OpenWiFi support (from OpenWiFi repo)
 
-Signed-off-by: Vincenzo Petrolo <vincenzo.petrolo@polito.it>
+Signed-off-by: Petrolo Vincenzo <s295043@studenti.polito.it>
 ---
  drivers/Kconfig                   |    6 +
  drivers/Makefile                  |    1 +
+ drivers/git_rev.h                 |    1 +
  drivers/hw_def.h                  |  464 +++++
+ drivers/nl80211_testmode_def.h    |   86 +
  drivers/openofdm_rx/openofdm_rx.c |  201 +++
  drivers/openofdm_tx/openofdm_tx.c |  171 ++
+ drivers/pre_def.h                 |    1 +
  drivers/rx_intf/rx_intf.c         |  449 +++++
  drivers/sdr.c                     | 2760 +++++++++++++++++++++++++++++
  drivers/sdr.h                     |  532 ++++++
@@ -19,10 +22,13 @@ Signed-off-by: Vincenzo Petrolo <vincenzo.petrolo@polito.it>
  drivers/sysfs_intf.c              | 1269 +++++++++++++
  drivers/tx_intf/tx_intf.c         |  484 +++++
  drivers/xpu/xpu.c                 |  558 ++++++
- 14 files changed, 8054 insertions(+)
+ 17 files changed, 8142 insertions(+)
+ create mode 100644 drivers/git_rev.h
  create mode 100644 drivers/hw_def.h
+ create mode 100644 drivers/nl80211_testmode_def.h
  create mode 100644 drivers/openofdm_rx/openofdm_rx.c
  create mode 100644 drivers/openofdm_tx/openofdm_tx.c
+ create mode 100644 drivers/pre_def.h
  create mode 100644 drivers/rx_intf/rx_intf.c
  create mode 100644 drivers/sdr.c
  create mode 100644 drivers/sdr.h
@@ -44,7 +50,7 @@ index dcecc9f..f4fa527 100644
 +
 +config OPENWIFI
 +	tristate "OpenWiFi support"
-+	depends on IIO && SPI && AD9361 
++	depends on IIO && SPI && AD9361
 +	help
 +        Say Y or M to enable the Openwifi driver
 diff --git a/drivers/Makefile b/drivers/Makefile
@@ -55,7 +61,14 @@ index 5762280..6a4e338 100644
  obj-$(CONFIG_INTERCONNECT)	+= interconnect/
  obj-$(CONFIG_COUNTER)		+= counter/
  obj-$(CONFIG_MOST)		+= most/
-+obj-$(CONFIG_OPENWIFI)		+= sdr.o sdrctl_intf.o sysfs_intf.o xpu.o tx_intf.o rx_intf.o side_ch.o openofdm_tx.o openofdm_rx.o
++obj-$(CONFIG_OPENWIFI)		+= sdr.o xpu/xpu.o tx_intf/tx_intf.o rx_intf/rx_intf.o side_ch/side_ch.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o
+diff --git a/drivers/git_rev.h b/drivers/git_rev.h
+new file mode 100644
+index 0000000..53a0819
+--- /dev/null
++++ b/drivers/git_rev.h
+@@ -0,0 +1 @@
++#define GIT_REV 0xb19a9c9
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..d353372
@@ -526,6 +539,98 @@ index 0000000..d353372
 +};
 +
 +// #endif
+diff --git a/drivers/nl80211_testmode_def.h b/drivers/nl80211_testmode_def.h
+new file mode 100644
+index 0000000..f7d6578
+--- /dev/null
++++ b/drivers/nl80211_testmode_def.h
+@@ -0,0 +1,86 @@
++// Author: Xianjun Jiao
++// SPDX-FileCopyrightText: 2019 UGent
++// SPDX-License-Identifier: AGPL-3.0-or-later
++
++//---nl80211 cmd testmode definitions
++//---should be used in driver sdr.c and user space app
++
++enum openwifi_testmode_attr {
++	__OPENWIFI_ATTR_INVALID = 0,
++	OPENWIFI_ATTR_CMD = 1,
++	OPENWIFI_ATTR_GAP = 2,
++	OPENWIFI_ATTR_SLICE_IDX = 3,
++	OPENWIFI_ATTR_ADDR = 4,
++	OPENWIFI_ATTR_SLICE_TOTAL = 5,
++	OPENWIFI_ATTR_SLICE_START = 6,
++	OPENWIFI_ATTR_SLICE_END = 7,
++	// OPENWIFI_ATTR_SLICE_TOTAL1 = 8,
++	// OPENWIFI_ATTR_SLICE_START1 = 9,
++	// OPENWIFI_ATTR_SLICE_END1 = 10,
++	OPENWIFI_ATTR_RSSI_TH = 11,
++	OPENWIFI_ATTR_HIGH_TSF = 12,
++	OPENWIFI_ATTR_LOW_TSF = 13,
++
++	REG_ATTR_ADDR = 14,
++	REG_ATTR_VAL = 15,
++
++	/* keep last */
++	__OPENWIFI_ATTR_AFTER_LAST,
++	OPENWIFI_ATTR_MAX	= __OPENWIFI_ATTR_AFTER_LAST - 1
++};
++
++enum openwifi_testmode_cmd {
++	OPENWIFI_CMD_SET_GAP = 0,
++	OPENWIFI_CMD_GET_GAP = 1,
++	
++	OPENWIFI_CMD_SET_SLICE_IDX = 2,
++	OPENWIFI_CMD_GET_SLICE_IDX = 3,
++	
++	OPENWIFI_CMD_SET_ADDR = 4,
++	OPENWIFI_CMD_GET_ADDR = 5,
++	
++	OPENWIFI_CMD_SET_SLICE_TOTAL = 6,
++	OPENWIFI_CMD_GET_SLICE_TOTAL = 7,
++
++	OPENWIFI_CMD_SET_SLICE_START = 8,
++	OPENWIFI_CMD_GET_SLICE_START = 9,
++
++	OPENWIFI_CMD_SET_SLICE_END = 10,
++	OPENWIFI_CMD_GET_SLICE_END = 11,
++
++	// OPENWIFI_CMD_SET_SLICE_TOTAL1 = 12,
++	// OPENWIFI_CMD_GET_SLICE_TOTAL1 = 13,
++
++	// OPENWIFI_CMD_SET_SLICE_START1 = 14,
++	// OPENWIFI_CMD_GET_SLICE_START1 = 15,
++
++	// OPENWIFI_CMD_SET_SLICE_END1 = 16,
++	// OPENWIFI_CMD_GET_SLICE_END1 = 17,
++
++	OPENWIFI_CMD_SET_RSSI_TH = 18,
++	OPENWIFI_CMD_GET_RSSI_TH = 19,
++
++	OPENWIFI_CMD_SET_TSF = 20,
++
++	REG_CMD_SET = 21,
++	REG_CMD_GET = 22,
++};
++
++static const struct nla_policy openwifi_testmode_policy[OPENWIFI_ATTR_MAX + 1] = {
++	[OPENWIFI_ATTR_CMD] = { .type = NLA_U32 },
++	[OPENWIFI_ATTR_GAP] = { .type = NLA_U32 },
++	[OPENWIFI_ATTR_SLICE_IDX] = { .type = NLA_U32 },
++	[OPENWIFI_ATTR_ADDR] = { .type = NLA_U32 },
++	[OPENWIFI_ATTR_SLICE_TOTAL] = { .type = NLA_U32 },
++	[OPENWIFI_ATTR_SLICE_START] = { .type = NLA_U32 },
++	[OPENWIFI_ATTR_SLICE_END] = { .type = NLA_U32 },
++	// [OPENWIFI_ATTR_SLICE_TOTAL1] = { .type = NLA_U32 },
++	// [OPENWIFI_ATTR_SLICE_START1] = { .type = NLA_U32 },
++	// [OPENWIFI_ATTR_SLICE_END1] = { .type = NLA_U32 },
++	[OPENWIFI_ATTR_RSSI_TH] = { .type = NLA_U32 },
++	[OPENWIFI_ATTR_HIGH_TSF] = { .type = NLA_U32 },
++	[OPENWIFI_ATTR_LOW_TSF] = { .type = NLA_U32 },
++
++	[REG_ATTR_ADDR] = { .type = NLA_U32 },
++	[REG_ATTR_VAL] = { .type = NLA_U32 },
++};
 diff --git a/drivers/openofdm_rx/openofdm_rx.c b/drivers/openofdm_rx/openofdm_rx.c
 new file mode 100644
 index 0000000..3fb94f4
@@ -910,6 +1015,13 @@ index 0000000..fe14436
 +MODULE_AUTHOR("Xianjun Jiao");
 +MODULE_DESCRIPTION("sdr,openofdm_tx");
 +MODULE_LICENSE("GPL v2");
+diff --git a/drivers/pre_def.h b/drivers/pre_def.h
+new file mode 100644
+index 0000000..68af682
+--- /dev/null
++++ b/drivers/pre_def.h
+@@ -0,0 +1 @@
++#define USE_NEW_RX_INTERRUPT 1
 diff --git a/drivers/rx_intf/rx_intf.c b/drivers/rx_intf/rx_intf.c
 new file mode 100644
 index 0000000..459f6d7
@@ -1367,7 +1479,7 @@ index 0000000..459f6d7
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/sdr.c b/drivers/sdr.c
 new file mode 100644
-index 0000000..18629bb
+index 0000000..f5e9144
 --- /dev/null
 +++ b/drivers/sdr.c
 @@ -0,0 +1,2760 @@
@@ -1425,7 +1537,7 @@ index 0000000..18629bb
 +#include <../../drivers/iio/adc/ad9361_private.h>
 +#include <../../drivers/iio/frequency/cf_axi_dds.h>
 +
-+#include "../user_space/sdrctl_src/nl80211_testmode_def.h"
++#include "nl80211_testmode_def.h"
 +#include "hw_def.h"
 +#include "sdr.h"
 +#include "git_rev.h"
