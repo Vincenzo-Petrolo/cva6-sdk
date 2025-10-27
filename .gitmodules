@@ -18,3 +18,9 @@
 [submodule "opensbi"]
 	path = opensbi
 	url = https://github.com/Vincenzo-Petrolo/opensbi
+[submodule "br_external/br_external_easyperf/package/easyperf/src"]
+	path = br_external/br_external_easyperf/package/easyperf/src
+	url = https://github.com/Vincenzo-Petrolo/easyperf.git
+[submodule "br_external_easyperf/package/easyperf/src"]
+	path = br_external_easyperf/package/easyperf/src
+	url = https://github.com/Vincenzo-Petrolo/easyperf.git

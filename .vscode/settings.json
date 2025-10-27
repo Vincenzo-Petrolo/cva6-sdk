@@ -1,0 +1,12 @@
+{
+    "files.associations": {
+        "*.core": "yaml",
+        "*.hjson": "hjson",
+        "*.tpl": "systemverilog",
+        "*.venv": "makefile",
+        "*.xdc": "tcl",
+        "*.gdb": "shellscript",
+        "*.ldh": "linkerscript",
+        "nl80211_testmode_def.h": "c"
+    }
+}
