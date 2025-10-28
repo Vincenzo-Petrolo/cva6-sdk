@@ -1,3 +1,4 @@
 menu "External options"
     source "$BR2_EXTERNAL_EASYP_PATH/package/easyperf/Config.in"
+    source "$BR2_EXTERNAL_EASYP_PATH/package/matmul/Config.in"
 endmenu
