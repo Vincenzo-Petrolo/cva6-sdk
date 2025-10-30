@@ -1,0 +1,199 @@
+#!/bin/sh
+
+VETH_A="veth0"
+VETH_B="veth1"
+A_ADDR="10.10.0.1/24"
+B_ADDR="10.10.0.2/24"
+UDP_PORT=4000
+UDP_SINK_PIDFILE="/var/run/pktgen_udp_sink.pid"
+PKTGEN_CTRL="/proc/net/pktgen/pgctrl"
+PKTGEN_KTHREAD_DIR="/proc/net/pktgen"
+PKTGEN_THREAD="/proc/net/pktgen/kpktgend_0"
+
+PKTGEN_DELAY=1000000  # 1000 pps (in nanoseconds)
+
+log() { echo "[pktgen_veth] $*"; }
+
+start() {
+    log "Starting veth + pktgen setup..."
+    log "WARNING: Rate limited to ~100 pps for low-power system"
+
+    # Load kernel modules (ok if built-in)
+    modprobe veth 2>/dev/null || true
+    modprobe pktgen 2>/dev/null || true
+
+    # Create veth pair (idempotent: delete if already exists)
+    ip link show ${VETH_A} >/dev/null 2>&1 && {
+        log "${VETH_A} already exists; deleting and recreating"
+        ip link del ${VETH_A} >/dev/null 2>&1 || true
+    }
+    ip link add ${VETH_A} type veth peer name ${VETH_B} || {
+        log "failed to create veth pair"; return 1
+    }
+
+    # Assign addresses and bring up
+    ip addr add ${A_ADDR} dev ${VETH_A} >/dev/null 2>&1 || true
+    ip addr add ${B_ADDR} dev ${VETH_B} >/dev/null 2>&1 || true
+    ip link set ${VETH_A} up
+    ip link set ${VETH_B} up
+
+    # Try to disable offloads so packets traverse kernel/CPU more
+    # (ethtool may not be present; ignore errors)
+    ethtool -K ${VETH_A} gro off gso off tso off rx off tx off 2>/dev/null || true
+    ethtool -K ${VETH_B} gro off gso off tso off rx off tx off 2>/dev/null || true
+
+    # Start a UDP sink on VETH_B that discards received data
+    # Try different netcat variants
+    if command -v ncat >/dev/null 2>&1; then
+        ncat -u -l ${B_ADDR%/*} ${UDP_PORT} >/dev/null 2>&1 &
+        echo $! > ${UDP_SINK_PIDFILE}
+        log "UDP sink (ncat, pid $(cat ${UDP_SINK_PIDFILE})) listening on ${B_ADDR%/*}:${UDP_PORT}"
+    elif netcat -h 2>&1 | grep -q "\-p"; then
+        # Traditional netcat with -p flag
+        netcat -u -l -p ${UDP_PORT} >/dev/null 2>&1 &
+        echo $! > ${UDP_SINK_PIDFILE}
+        log "UDP sink (netcat -p, pid $(cat ${UDP_SINK_PIDFILE})) listening on ${B_ADDR%/*}:${UDP_PORT}"
+    else
+        # BSD-style netcat (no -p flag)
+        netcat -u -l ${UDP_PORT} >/dev/null 2>&1 &
+        echo $! > ${UDP_SINK_PIDFILE}
+        log "UDP sink (netcat, pid $(cat ${UDP_SINK_PIDFILE})) listening on ${B_ADDR%/*}:${UDP_PORT}"
+    fi
+
+    # Verify UDP sink is running
+    sleep 1
+    if ! kill -0 $(cat ${UDP_SINK_PIDFILE} 2>/dev/null) 2>/dev/null; then
+        log "WARNING: UDP sink failed to start"
+    fi
+
+    # Prepare pktgen: attach VETH_A to a pktgen thread
+    # Ensure the kpktgend_0 exists; add_device idempotently.
+    if [ -r "/proc/net/pktgen/kpktgend_0" ]; then
+        echo "rem_device_all" > /proc/net/pktgen/kpktgend_0 2>/dev/null || true
+        echo "add_device ${VETH_A}" > /proc/net/pktgen/kpktgend_0
+    else
+        log "ERROR: pktgen thread kpktgend_0 not found"
+        return 1
+    fi
+
+    # Get destination MAC address
+    DST_MAC=$(cat /sys/class/net/${VETH_B}/address 2>/dev/null)
+    [ -z "$DST_MAC" ] && DST_MAC="ff:ff:ff:ff:ff:ff"
+    log "Using dst MAC: ${DST_MAC}"
+
+    # Build pktgen config for VETH_A
+    # OPTIMIZED FOR 50MHz SINGLE CORE:
+    # - clone_skb 100: reuse skbs to reduce allocation overhead
+    # - delay: CRITICAL rate limiting
+    # - count: limit total packets to avoid infinite load
+    # - flows: reduced to 16 (minimal overhead)
+    # - smaller packet size for less work
+    DEVICE_CFG="/proc/net/pktgen/${VETH_A}"
+    if [ ! -w "${DEVICE_CFG}" ]; then
+        log "ERROR: Cannot write to ${DEVICE_CFG}"
+        return 1
+    fi
+
+    # Configure pktgen with error checking
+    # Note: Some options may not be supported on all kernel versions
+    echo "clone_skb 0" > ${DEVICE_CFG} || log "WARN: clone_skb failed"
+    echo "pkt_size 512" > ${DEVICE_CFG} || log "WARN: pkt_size failed"
+    echo "count 0" > ${DEVICE_CFG} || log "WARN: count failed"
+    echo "delay ${PKTGEN_DELAY}" > ${DEVICE_CFG} || log "WARN: delay failed"
+    echo "dst ${B_ADDR%/*}" > ${DEVICE_CFG} || log "WARN: dst failed"
+    echo "dst_mac ${DST_MAC}" > ${DEVICE_CFG} || log "WARN: dst_mac failed"
+    echo "udp_dst_min ${UDP_PORT}" > ${DEVICE_CFG} || log "WARN: udp_dst_min failed"
+    echo "udp_dst_max ${UDP_PORT}" > ${DEVICE_CFG} || log "WARN: udp_dst_max failed"
+    echo "udp_src_min 10000" > ${DEVICE_CFG} || log "WARN: udp_src_min failed"
+    echo "udp_src_max 10016" > ${DEVICE_CFG} || log "WARN: udp_src_max failed"
+    
+    # Try flag UDPCSUM, fall back to udp_csum if not supported
+    if ! echo "flag UDPCSUM" > ${DEVICE_CFG} 2>/dev/null; then
+        log "WARN: flag UDPCSUM not supported, trying udp_csum"
+        echo "udp_csum 1" > ${DEVICE_CFG} 2>/dev/null || log "WARN: udp_csum also failed"
+    fi
+    
+    # flows and flowlen might not be supported on older kernels
+    echo "flows 16" > ${DEVICE_CFG} 2>/dev/null || log "WARN: flows not supported (skipping)"
+    echo "flowlen 10" > ${DEVICE_CFG} 2>/dev/null || log "WARN: flowlen not supported (skipping)"
+
+    log "pktgen device configured"
+
+    # Start pktgen (this causes kernel pktgen threads to begin)
+    (echo "start" > ${PKTGEN_CTRL}) &
+    sleep 1  # Give it a moment to start
+
+    log "pktgen started -> ${VETH_A} -> ${VETH_B}"
+    
+    # Show initial stats
+    sleep 2
+    log "Initial packet stats:"
+    grep -E "pkts|errors" ${DEVICE_CFG} 2>/dev/null | head -5 || true
+    
+    return 0
+}
+
+stop() {
+    log "Stopping pktgen and cleaning up..."
+
+    # stop pktgen
+    if [ -w "${PKTGEN_CTRL}" ]; then
+        echo "stop" > ${PKTGEN_CTRL} 2>/dev/null || true
+    fi
+
+    # remove device from pktgen threads if present
+    if [ -r "/proc/net/pktgen/kpktgend_0" ]; then
+        echo "rem_device_all" > /proc/net/pktgen/kpktgend_0 2>/dev/null || true
+    fi
+
+    # kill udp sink
+    if [ -f "${UDP_SINK_PIDFILE}" ]; then
+        PID=$(cat ${UDP_SINK_PIDFILE} 2>/dev/null)
+        [ -n "$PID" ] && kill "${PID}" 2>/dev/null || true
+        rm -f ${UDP_SINK_PIDFILE}
+    fi
+
+    # delete veth pair
+    ip link del ${VETH_A} 2>/dev/null || true
+
+    log "stopped"
+}
+
+status() {
+    log "Status:"
+    ip -br link show ${VETH_A} ${VETH_B} 2>/dev/null || true
+    
+    if [ -f "${UDP_SINK_PIDFILE}" ]; then
+        PID=$(cat ${UDP_SINK_PIDFILE})
+        if kill -0 ${PID} 2>/dev/null; then
+            echo "UDP sink running (pid: ${PID})"
+        else
+            echo "UDP sink NOT running (stale pidfile)"
+        fi
+    else
+        echo "UDP sink not running"
+    fi
+    
+    echo ""
+    echo "pktgen status:"
+    if [ -r "/proc/net/pktgen/${VETH_A}" ]; then
+        grep -E "Result:|pkts-sofar|errors|started_at|clone_skb|delay" /proc/net/pktgen/${VETH_A} 2>/dev/null || true
+    else
+        echo "pktgen device ${VETH_A} not configured"
+    fi
+    
+    echo ""
+    echo "Interface statistics:"
+    ip -s link show ${VETH_A} 2>/dev/null | head -10 || true
+    ip -s link show ${VETH_B} 2>/dev/null | head -10 || true
+}
+
+case "$1" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; sleep 2; start ;;
+  status) status ;;
+  *) echo "Usage: $0 {start|stop|restart|status}"; exit 2 ;;
+esac
+
+exit 0
