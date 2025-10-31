@@ -1,5 +1,5 @@
 ################################################################################
-# easyperf (local-source package)
+# matmul (local-source package)
 ################################################################################
 
 MATMUL_SITE          = $(BR2_EXTERNAL_EASYP_PATH)/package/matmul/src
