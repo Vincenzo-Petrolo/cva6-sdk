@@ -16,6 +16,13 @@ BR2_LINUX_KERNEL_PATCH="../linux_patch/"
 BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
 BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="../configs/linux64_defconfig"
 BR2_LINUX_KERNEL_VMLINUX=y
+
+# This two flags enable devtmpfs, means that I dont create the device nodes
+# statically, but I create it runtime depending on which driver detects which
+# hardware.  This is more flexible and modern.
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
+BR2_ROOTFS_DEVICE_TABLE=""
+
 BR2_PACKAGE_BUSYBOX_CONFIG="../configs/busybox64.config"
 BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_APLAY=y
