@@ -14,7 +14,13 @@
 	url = https://github.com/pulp-platform/vitetris.git
 [submodule "u-boot"]
 	path = u-boot
-	url = https://github.com/pulp-platform/u-boot
+	url = https://github.com/Vincenzo-Petrolo/u-boot.git
 [submodule "opensbi"]
 	path = opensbi
-	url = https://github.com/Vincenzo-Petrolo/opensbi
+	url = https://github.com/Vincenzo-Petrolo/opensbi.git
+[submodule "br_external/br_external_easyperf/package/easyperf/src"]
+	path = br_external/br_external_easyperf/package/easyperf/src
+	url = https://github.com/Vincenzo-Petrolo/easyperf.git
+[submodule "br_external_easyperf/package/easyperf/src"]
+	path = br_external_easyperf/package/easyperf/src
+	url = https://github.com/Vincenzo-Petrolo/easyperf.git
