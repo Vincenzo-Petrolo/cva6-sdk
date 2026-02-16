@@ -1,5 +1,0 @@
-config BR2_PACKAGE_EASYPERF
-    bool "easyperf"
-    help
-      Simple performance tool from https://github.com/Vincenzo-Petrolo/easyperf
-

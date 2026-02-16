@@ -1,0 +1,4 @@
+config BR2_PACKAGE_ARCANE_TESTS
+	bool "arcane_tests"
+	help
+	  Userspace functional test for ARCANE matrix extension.

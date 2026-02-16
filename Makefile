@@ -74,8 +74,8 @@ tests: install-dir $(CC)
 	cd $(ROOT)
 
 $(CC): $(buildroot_defconfig) $(linux_defconfig) $(busybox_defconfig)
-	make -C buildroot defconfig BR2_DEFCONFIG=../$(buildroot_defconfig)
-	make -C buildroot host-gcc-final $(buildroot-mk)
+	make -C buildroot defconfig BR2_DEFCONFIG=../$(buildroot_defconfig) BR2_EXTERNAL=../br_external_easyperf
+	make -C buildroot host-gcc-final $(buildroot-mk) BR2_EXTERNAL=../br_external_easyperf
 
 all: $(CC) isa-sim
 
@@ -91,7 +91,7 @@ rootfs/tetris: $(CC)
 
 $(RISCV)/vmlinux: $(buildroot_defconfig) $(linux_defconfig) $(busybox_defconfig) $(CC) rootfs/tetris
 	mkdir -p $(RISCV)
-	make -C buildroot $(buildroot-mk)
+	make -C buildroot $(buildroot-mk) BR2_EXTERNAL=../br_external_easyperf
 	cp buildroot/output/images/vmlinux $@
 
 $(RISCV)/Image: $(RISCV)/vmlinux

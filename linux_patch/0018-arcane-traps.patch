@@ -1,0 +1,59 @@
+diff --git a/arch/riscv/kernel/entry.S b/arch/riscv/kernel/entry.S
+index 524d918f3601..e1f978d22235 100644
+--- a/arch/riscv/kernel/entry.S
++++ b/arch/riscv/kernel/entry.S
+@@ -463,6 +463,17 @@ ENTRY(excp_vect_table)
+ 	RISCV_PTR do_page_fault   /* load page fault */
+ 	RISCV_PTR do_trap_unknown
+ 	RISCV_PTR do_page_fault   /* store page fault */
++	RISCV_PTR do_trap_unknown
++	RISCV_PTR do_trap_unknown
++	RISCV_PTR do_trap_unknown
++	RISCV_PTR do_trap_unknown
++	RISCV_PTR do_trap_unknown
++	RISCV_PTR do_trap_unknown
++	RISCV_PTR do_trap_unknown
++	RISCV_PTR do_trap_unknown
++	RISCV_PTR do_trap_unknown
++	RISCV_PTR do_trap_arcane_store_fault /*ARCANE store access fault*/
++	RISCV_PTR do_trap_arcane_load_fault  /*ARCANE load access fault*/
+ excp_vect_table_end:
+ END(excp_vect_table)
+ 
+diff --git a/arch/riscv/kernel/traps.c b/arch/riscv/kernel/traps.c
+index ad14f4466d92..d04d5326153d 100644
+--- a/arch/riscv/kernel/traps.c
++++ b/arch/riscv/kernel/traps.c
+@@ -83,6 +83,32 @@ static void do_trap_error(struct pt_regs *regs, int signo, int code,
+ 	}
+ }
+ 
++asmlinkage void do_trap_arcane_store_fault(struct pt_regs *regs)
++{
++	/**
++	 * Instead of calling schedule() directly (which is unsafe in an exception context),
++	 * we set the TIF_NEED_RESCHED flag. The low-level exception return code (ret_from_exception)
++	 * will check this flag and call schedule() for us in a safe context before returning
++	 * to userspace.
++	 */
++	set_tsk_need_resched(current);
++
++	return;
++}
++
++asmlinkage void do_trap_arcane_load_fault(struct pt_regs *regs)
++{
++	/**
++	 * Instead of calling schedule() directly (which is unsafe in an exception context),
++	 * we set the TIF_NEED_RESCHED flag. The low-level exception return code (ret_from_exception)
++	 * will check this flag and call schedule() for us in a safe context before returning
++	 * to userspace.
++	 */
++	set_tsk_need_resched(current);
++
++	return;
++}
++
+ #define DO_ERROR_INFO(name, signo, code, str)				\
+ asmlinkage __visible void name(struct pt_regs *regs)			\
+ {									\

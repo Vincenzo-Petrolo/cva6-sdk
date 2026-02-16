@@ -1,5 +1,0 @@
-config BR2_PACKAGE_MATMUL
-    bool "matmul"
-    help
-      Simple matrix multiplication benchmark
-

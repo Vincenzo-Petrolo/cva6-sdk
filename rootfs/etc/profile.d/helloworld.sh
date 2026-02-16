@@ -1,1 +1,1 @@
-printf "\n\e[4;37m%s\e[1m\e[38;5;208m%s\e[38;5;209m%s\e[38;5;210m%s\e[38;5;211m%s\e[38;5;212m%s\e[38;5;177m%s\e[38;5;141m%s\e[38;5;105m%s\e[m\n\n" "[PULP Platform] Welcome to Linux on " "C" "h" "e" "s" "h" "i" "r" "e"
+printf "\n\e[4;37m%s\e[1m\e[38;2;91;140;56m%s\e[38;2;139;195;74m%s\e[38;2;77;208;225m%s\e[38;2;2;136;209m%s\e[38;2;3;169;244m%s\e[38;2;77;208;225m%s\e[38;2;253;216;53m%s\e[38;2;255;235;59m%s\e[m\n\n" "Welcome to Linux on " "T" "h" "e" "s" "h" "i" "r" "e"
