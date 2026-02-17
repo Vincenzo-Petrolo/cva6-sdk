@@ -13,5 +13,6 @@
 // Arcane Controller <-> Bridge control and status register
 #define ARCANE_CTL_OP_CTL_REG_OFFSET 0x4
 #define ARCANE_CTL_OP_CTL_NO_OFFLOAD_BIT 7
+#define ARCANE_CTL_OP_CTL_EXCEPTION_EN_BIT 16
 
 #endif

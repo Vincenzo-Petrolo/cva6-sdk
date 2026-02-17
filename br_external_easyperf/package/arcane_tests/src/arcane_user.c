@@ -135,6 +135,11 @@ int arcane_init(void) {
     }
     printf("[ARCANE] FW Initialized (no_offload check passed)\n");
 
+    // Enable exception mode
+    *op_ctl |= (1 << ARCANE_CTL_OP_CTL_EXCEPTION_EN_BIT);
+
+    printf("[ARCANE] Enabling exception mode\n");
+
     // 4. CMA Setup
     mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (mem_fd < 0) { perror("[ARCANE] open /dev/mem"); return -1; }
