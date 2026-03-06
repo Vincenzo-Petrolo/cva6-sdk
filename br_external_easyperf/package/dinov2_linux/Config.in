@@ -1,0 +1,4 @@
+config BR2_PACKAGE_DINOV2_LINUX
+	bool "dinov2_linux"
+	help
+	  DINOv2 Small ViT inference app with ARCANE acceleration.

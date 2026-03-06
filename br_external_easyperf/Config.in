@@ -1,3 +1,4 @@
 menu "External options"
     source "$BR2_EXTERNAL_EASYP_PATH/package/arcane_tests/Config.in"
+    source "$BR2_EXTERNAL_EASYP_PATH/package/dinov2_linux/Config.in"
 endmenu
