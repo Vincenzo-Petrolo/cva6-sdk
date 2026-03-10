@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <time.h> // Added for clock_gettime
 #include "tvmgen_default.h"
 #include "arcane_user.h"
 
@@ -44,16 +45,32 @@ static void base64_encode_chunk(const uint8_t* in, int len, char* out) {
 }
 
 static volatile int _inference_running = 1;
-void* progress_bar_thread(void* arg) {
+
+// Thread to count and display elapsed time
+void* timer_thread(void* arg) {
+    struct timespec start_time, current_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
     const char spin[] = {'|', '/', '-', '\\'};
     int i = 0;
+    
     while(_inference_running) {
-        printf("\r\033[KRunning MobileNetV2 inference via ARCANE... %c", spin[i]);
-        fflush(stdout);
+        clock_gettime(CLOCK_MONOTONIC, &current_time);
+        double elapsed = (current_time.tv_sec - start_time.tv_sec) + 
+                         (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
+                         
+        // printf("\r\033[KRunning MobileNetV2 inference via ARCANE... %c [%.1f s]", spin[i], elapsed);
+        // fflush(stdout);
         i = (i + 1) % 4;
         usleep(100000); // 100ms
     }
-    printf("\r\033[KInference completed successfully!\n");
+    
+    // Print final time once inference loop exits
+    clock_gettime(CLOCK_MONOTONIC, &current_time);
+    double final_elapsed = (current_time.tv_sec - start_time.tv_sec) + 
+                           (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
+    printf("\r\033[KInference completed successfully in %.2f seconds!\n", final_elapsed);
+    
     return NULL;
 }
 
@@ -200,16 +217,16 @@ int main(int argc, char** argv) {
         .cma_workspace_pool = g_cma_workspace_virt,
     };
     
-    // Start progress bar thread
+    // Start progress bar and timer thread
     _inference_running = 1;
     pthread_t progress_thread;
-    // pthread_create(&progress_thread, NULL, progress_bar_thread, NULL);
+    pthread_create(&progress_thread, NULL, timer_thread, NULL);
     
     int32_t ret = tvmgen_default_run(&tvm_inputs, &tvm_outputs, &tvm_workspace);
-    
-    // Stop progress bar thread
+
+    // Stop progress bar and timer thread
     _inference_running = 0;
-    // pthread_join(progress_thread, NULL);
+    pthread_join(progress_thread, NULL);
     
     if (ret != 0) {
         printf("TVM run failed with err %d\n", ret);

@@ -1,0 +1,4 @@
+config BR2_PACKAGE_MOBILENET_LINUX
+	bool "mobilenet_linux"
+	help
+	  MobilenetV2 Inference app running on ARCANE.
