@@ -43,7 +43,7 @@ new file mode 100644
 index 000000000000..6e613f65fdf2
 --- /dev/null
 +++ b/drivers/spi/spi-opentitan.c
-@@ -0,0 +1,757 @@
+@@ -0,0 +1,773 @@
 +#include <linux/io.h>
 +#include <linux/interrupt.h>
 +#include <linux/module.h>
@@ -386,7 +386,12 @@ index 000000000000..6e613f65fdf2
 +				} while(!((status >> 8) & 0xFF) && read_timeout > 0);
 +
 +                if(read_timeout == 0 && !((status >> 8) & 0xFF)){
-+                	dev_err(&master->dev, "RX queue did not notify us about the last bytes\r\n");
++                	unsigned int error_status = ioread32((volatile unsigned int *) (priv->regs + REG_ERROR_STATUS));
++                	unsigned int intr_state = ioread32((volatile unsigned int *) (priv->regs + REG_INTR_STATE));
++                	unsigned int csid = ioread32((volatile unsigned int *) (priv->regs + REG_CSID));
++                	dev_err(&master->dev,
++                	        "RX queue timeout: status=0x%x error_status=0x%x intr_state=0x%x csid=%u cmd=0x%x dir=%u bytes_rcvd=%u num_bytes=%u\r\n",
++                	        status, error_status, intr_state, csid, command, dir, bytes_rcvd, num_bytes);
 +                	return -1;
 +                }
 +        
@@ -618,6 +623,8 @@ index 000000000000..6e613f65fdf2
 +									   struct spi_transfer *t)
 +{
 +	struct opentitan_qspi_priv *priv = spi_master_get_devdata(master);
++	unsigned long flags = 0;
++	bool is_last = spi_transfer_is_last(master, t);
 +
 +	/* Set the speed according to the transfer or use the last speed */
 +	if (t->speed_hz){
@@ -626,8 +633,18 @@ index 000000000000..6e613f65fdf2
 +	} else {
 +		opentitan_qspi_set_speed(master, priv->cur_freq);
 +	}
-+	
-+	return opentitan_qspi_xfer(master, t->len*8, t->tx_buf, t->rx_buf, 0);
++
++	/*
++	 * SPI host RX FIFO flushes trailing partial words at segment end.
++	 * Derive segment-end from Linux transfer semantics:
++	 *   - Last transfer + !cs_change => deselect at end.
++	 *   - Non-last + cs_change       => brief deselect before next transfer.
++	 */
++	if ((is_last && !t->cs_change) || (!is_last && t->cs_change)) {
++		flags |= SPI_XFER_END;
++	}
++
++	return opentitan_qspi_xfer(master, t->len * 8, t->tx_buf, t->rx_buf, flags);
 +}
 +
 +static int opentitan_qspi_probe(struct platform_device *pdev)
@@ -689,7 +706,7 @@ index 000000000000..6e613f65fdf2
 +	/* Define our master */
 +	master->dev.of_node 		= pdev->dev.of_node;
 +	master->bus_num 			= pdev->id;
-+	master->num_chipselect 		= 1;
++	master->num_chipselect 		= 2;
 +	master->mode_bits 			= SPI_CPHA | SPI_CPOL; // | SPI_CS_HIGH;
 +	master->bits_per_word_mask 	= SPI_BPW_MASK(8);
 +	master->max_speed_hz		= priv->max_freq;
@@ -803,4 +820,3 @@ index 000000000000..6e613f65fdf2
 +MODULE_LICENSE("GPL");
 -- 
 2.16.5
-

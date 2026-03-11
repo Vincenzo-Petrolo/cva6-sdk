@@ -1,0 +1,22 @@
+# kind	source_path	dest_path
+glue	-	drivers/Kconfig
+glue	-	drivers/Makefile
+copy	driver/git_rev.h	drivers/git_rev.h
+copy	driver/hw_def.h	drivers/hw_def.h
+copy	driver/nl80211_testmode_def.h	drivers/nl80211_testmode_def.h
+copy	driver/openofdm_rx/openofdm_rx.c	drivers/openofdm_rx/openofdm_rx.c
+copy	driver/openofdm_tx/openofdm_tx.c	drivers/openofdm_tx/openofdm_tx.c
+copy	driver/pre_def.h	drivers/pre_def.h
+copy	driver/rx_intf/rx_intf.c	drivers/rx_intf/rx_intf.c
+copy	driver/sdr.c	drivers/sdr.c
+copy	driver/sdr.h	drivers/sdr.h
+copy	driver/sdr_mac_ops.c	drivers/sdr_mac_ops.c
+copy	driver/sdr_rx.c	drivers/sdr_rx.c
+copy	driver/sdr_tx.c	drivers/sdr_tx.c
+copy	driver/sdr_utils.c	drivers/sdr_utils.c
+copy	driver/sdrctl_intf.c	drivers/sdrctl_intf.c
+copy	driver/side_ch/side_ch.c	drivers/side_ch/side_ch.c
+copy	driver/side_ch/side_ch.h	drivers/side_ch/side_ch.h
+copy	driver/sysfs_intf.c	drivers/sysfs_intf.c
+copy	driver/tx_intf/tx_intf.c	drivers/tx_intf/tx_intf.c
+copy	driver/xpu/xpu.c	drivers/xpu/xpu.c

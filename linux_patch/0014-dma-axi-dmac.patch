@@ -1,0 +1,448 @@
+diff --git a/drivers/dma/dma-axi-dmac.c b/drivers/dma/dma-axi-dmac.c
+index 5161b73c..cfc0f327 100644
+--- a/drivers/dma/dma-axi-dmac.c
++++ b/drivers/dma/dma-axi-dmac.c
+@@ -18,6 +18,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/of_dma.h>
++#include <linux/of_address.h>
+ #include <linux/platform_device.h>
+ #include <linux/regmap.h>
+ #include <linux/slab.h>
+@@ -28,6 +29,17 @@
+ #include "dmaengine.h"
+ #include "virt-dma.h"
+ 
++#ifdef DEBUG_OPENWIFI_ADI_DMA
++/*
++ * Use rate-limited dev_info so debug works even when tracefs/ftrace is not
++ * available in the running kernel image.
++ */
++#define OW_DMA_DBG(dev, fmt, ...) \
++	dev_info_ratelimited(dev, "[OW_DMA] " fmt, ##__VA_ARGS__)
++#else
++#define OW_DMA_DBG(dev, fmt, ...) do {} while (0)
++#endif
++
+ /*
+  * The AXI-DMAC is a soft IP core that is used in FPGA designs. The core has
+  * various instantiation parameters which decided the exact feature set support
+@@ -55,6 +67,9 @@
+ #define   AXI_DMAC_DMA_DST_TYPE_GET(x)	FIELD_GET(AXI_DMAC_DMA_DST_TYPE_MSK, x)
+ #define   AXI_DMAC_DMA_DST_WIDTH_MSK	GENMASK(3, 0)
+ #define   AXI_DMAC_DMA_DST_WIDTH_GET(x)	FIELD_GET(AXI_DMAC_DMA_DST_WIDTH_MSK, x)
++#define AXI_DMAC_REG_COHERENCY_DESC	0x14
++#define   AXI_DMAC_DST_COHERENT_MSK	BIT(0)
++#define   AXI_DMAC_DST_COHERENT_GET(x)	FIELD_GET(AXI_DMAC_DST_COHERENT_MSK, x)
+ 
+ #define AXI_DMAC_REG_IRQ_MASK		0x80
+ #define AXI_DMAC_REG_IRQ_PENDING	0x84
+@@ -73,8 +88,11 @@
+ #define AXI_DMAC_REG_TRANSFER_DONE	0x428
+ #define AXI_DMAC_REG_ACTIVE_TRANSFER_ID 0x42c
+ #define AXI_DMAC_REG_STATUS		0x430
+-#define AXI_DMAC_REG_CURRENT_SRC_ADDR	0x434
+-#define AXI_DMAC_REG_CURRENT_DEST_ADDR	0x438
++#define AXI_DMAC_REG_CURRENT_DEST_ADDR	0x434  /* ADI doc: 0x434 = CURRENT_DEST_ADDRESS */
++#define AXI_DMAC_REG_CURRENT_SRC_ADDR	0x438  /* ADI doc: 0x438 = CURRENT_SRC_ADDRESS */
++#define AXI_DMAC_REG_DBG0		0x43c
++#define AXI_DMAC_REG_DBG1		0x440
++#define AXI_DMAC_REG_DBG2		0x444
+ #define AXI_DMAC_REG_PARTIAL_XFER_LEN	0x44c
+ #define AXI_DMAC_REG_PARTIAL_XFER_ID	0x450
+ 
+@@ -147,6 +165,18 @@ struct axi_dmac {
+ 	struct axi_dmac_chan chan;
+ };
+ 
++/*
++ * OpenWiFi RX experiment knob:
++ * - true: force FLAG_LAST for cyclic S2MM submits (legacy OpenWiFi behavior)
++ * - false: rely on descriptor-length completion only (Try-1 behavior)
++ */
++static bool ow_rx_force_flag_last = false;
++module_param_named(ow_rx_force_flag_last, ow_rx_force_flag_last, bool, 0644);
++MODULE_PARM_DESC(ow_rx_force_flag_last,
++		 "Force FLAG_LAST on cyclic S2MM submits (default: false)");
++
++static bool axi_dmac_desc_has_partial_len(struct axi_dmac_desc *desc);
++
+ static struct axi_dmac *chan_to_axi_dmac(struct axi_dmac_chan *chan)
+ {
+ 	return container_of(chan->vchan.chan.device, struct axi_dmac,
+@@ -208,10 +238,8 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
+ 	struct axi_dmac_sg *sg;
+ 	unsigned int flags = 0;
+ 	unsigned int val;
+-
+-	val = axi_dmac_read(dmac, AXI_DMAC_REG_START_TRANSFER);
+-	if (val) /* Queue is full, wait for the next SOT IRQ */
+-		return;
++	unsigned int retries;
++	unsigned int prev_idx;
+ 
+ 	desc = chan->next_desc;
+ 
+@@ -221,14 +249,60 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
+ 			return;
+ 		list_move_tail(&vdesc->node, &chan->active_descs);
+ 		desc = to_axi_dmac_desc(vdesc);
++		/*
++		 * Upstream SW-cyclic fix (2025):
++		 * keep next_desc bound as soon as we dequeue it so cyclic
++		 * descriptors with corner-case segment counts keep resubmitting.
++		 */
++		chan->next_desc = desc;
+ 	}
+ 	sg = &desc->sg[desc->num_submitted];
++	if (desc->have_partial_xfer &&
++	    !axi_dmac_desc_has_partial_len(desc))
++		desc->have_partial_xfer = false;
++
++	val = axi_dmac_read(dmac, AXI_DMAC_REG_START_TRANSFER);
++	if (val) {
++		/*
++		 * RX S2MM can occasionally observe START_TRANSFER still high for
++		 * a short window around completion IRQ handling. Retry briefly
++		 * before treating it as busy.
++		 */
++		if (chan->direction == DMA_DEV_TO_MEM) {
++			for (retries = 0; retries < 64 && val; retries++) {
++				cpu_relax();
++				val = axi_dmac_read(dmac, AXI_DMAC_REG_START_TRANSFER);
++			}
++		}
++		if (val) {
++			/*
++			 * If queue is still busy, mark the most recently submitted
++			 * segment so transfer_done() can force a re-attempt once
++			 * that segment completes.
++			 */
++			if (sg->id != AXI_DMAC_SG_UNUSED) {
++				sg->schedule_when_free = true;
++			} else if (desc->cyclic && desc->num_sgs) {
++				prev_idx = desc->num_submitted ?
++					   desc->num_submitted - 1 :
++					   desc->num_sgs - 1;
++				if (desc->sg[prev_idx].id != AXI_DMAC_SG_UNUSED)
++					desc->sg[prev_idx].schedule_when_free = true;
++			}
++			return;
++		}
++	}
+ 
+ 	/* Already queued in cyclic mode. Wait for it to finish */
+ 	if (sg->id != AXI_DMAC_SG_UNUSED) {
+ 		sg->schedule_when_free = true;
+ 		return;
+ 	}
++	/*
++	 * Defensive clear: cyclic descriptors reuse SG slots.  Make sure a stale
++	 * partial_len from a previous cycle cannot affect wrap/residue logic.
++	 */
++	sg->partial_len = 0;
+ 
+ 	desc->num_submitted++;
+ 	if (desc->num_submitted == desc->num_sgs ||
+@@ -238,8 +312,6 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
+ 		else
+ 			chan->next_desc = NULL;
+ 		flags |= AXI_DMAC_FLAG_LAST;
+-	} else {
+-		chan->next_desc = desc;
+ 	}
+ 
+ 	sg->id = axi_dmac_read(dmac, AXI_DMAC_REG_TRANSFER_ID);
+@@ -266,9 +338,41 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
+ 	if (chan->hw_partial_xfer)
+ 		flags |= AXI_DMAC_FLAG_PARTIAL_REPORT;
+ 
++	/*
++	 * For cyclic stream-to-memory (S2MM), keep PARTIAL_REPORT disabled to
++	 * avoid partial_len-driven early wraparound in cyclic tracking.
++	 */
++	if (desc->cyclic && axi_dmac_dest_is_mem(chan)) {
++		flags &= ~AXI_DMAC_FLAG_PARTIAL_REPORT;
++		if (ow_rx_force_flag_last)
++			flags |= AXI_DMAC_FLAG_LAST;
++	}
++
+ 	axi_dmac_write(dmac, AXI_DMAC_REG_X_LENGTH, sg->x_len - 1);
+ 	axi_dmac_write(dmac, AXI_DMAC_REG_Y_LENGTH, sg->y_len - 1);
++#ifdef DEBUG_OPENWIFI_ADI_DMA
++	if (desc->cyclic) {
++		OW_DMA_DBG(dmac->dma_dev.dev,
++			"start_xfer: seg=%u/%u dest=0x%pad len=%u flags=0x%x\n",
++			desc->num_submitted, desc->num_sgs,
++			&sg->dest_addr, sg->x_len, flags);
++	} else {
++		static u32 tx_xfer_cnt;
++		if ((++tx_xfer_cnt & 0x3FF) == 1)
++			OW_DMA_DBG(dmac->dma_dev.dev,
++				"tx_xfer#%u src=0x%pad len=%u flags=0x%x\n",
++				tx_xfer_cnt, &sg->src_addr, sg->x_len, flags);
++	}
++#endif
+ 	axi_dmac_write(dmac, AXI_DMAC_REG_FLAGS, flags);
++	/*
++	 * Belt-and-suspenders: ensure IRQs unmasked even after FPGA reload.
++	 * FPGA reload resets IRQ_MASK to 0x03 (all masked). If driver probed
++	 * before reload, its probe()-time unmask was lost.
++	 * NOTE(openwifi-irq-unmask-policy): keep this unconditional so TX/MM2S
++	 * and non-cyclic paths also recover after in-place PL reload.
++	 */
++	axi_dmac_write(dmac, AXI_DMAC_REG_IRQ_MASK, 0x00);
+ 	axi_dmac_write(dmac, AXI_DMAC_REG_START_TRANSFER, 1);
+ }
+ 
+@@ -287,6 +391,18 @@ static inline unsigned int axi_dmac_total_sg_bytes(struct axi_dmac_chan *chan,
+ 		return sg->x_len;
+ }
+ 
++static bool axi_dmac_desc_has_partial_len(struct axi_dmac_desc *desc)
++{
++	unsigned int i;
++
++	for (i = 0; i < desc->num_sgs; i++) {
++		if (desc->sg[i].partial_len)
++			return true;
++	}
++
++	return false;
++}
++
+ static void axi_dmac_dequeue_partial_xfers(struct axi_dmac_chan *chan)
+ {
+ 	struct axi_dmac *dmac = chan_to_axi_dmac(chan);
+@@ -371,11 +487,16 @@ static bool axi_dmac_transfer_done(struct axi_dmac_chan *chan,
+ 		axi_dmac_dequeue_partial_xfers(chan);
+ 
+ 	do {
++		bool partial_done;
++		struct axi_dmac_desc *done_desc;
++
+ 		sg = &active->sg[active->num_completed];
++		done_desc = active;
+ 		if (sg->id == AXI_DMAC_SG_UNUSED) /* Not yet submitted */
+ 			break;
+ 		if (!(BIT(sg->id) & completed_transfers))
+ 			break;
++		partial_done = (sg->partial_len != 0);
+ 		active->num_completed++;
+ 		sg->id = AXI_DMAC_SG_UNUSED;
+ 		if (sg->schedule_when_free) {
+@@ -383,14 +504,26 @@ static bool axi_dmac_transfer_done(struct axi_dmac_chan *chan,
+ 			start_next = true;
+ 		}
+ 
+-		if (sg->partial_len)
++		if (partial_done)
+ 			axi_dmac_compute_residue(chan, active);
+ 
+-		if (active->cyclic)
++		if (active->cyclic) {
++#ifdef DEBUG_OPENWIFI_ADI_DMA
++			{
++				static u32 cyc_done_cnt;
++				if ((++cyc_done_cnt & 0xFF) == 1)
++					OW_DMA_DBG(chan->vchan.chan.device->dev,
++						"cyc_done#%u seg=%u/%u partial=%u\n",
++						cyc_done_cnt,
++						active->num_completed,
++						active->num_sgs, sg->partial_len);
++			}
++#endif
+ 			vchan_cyclic_callback(&active->vdesc);
++		}
+ 
+ 		if (active->num_completed == active->num_sgs ||
+-		    sg->partial_len) {
++		    partial_done) {
+ 			if (active->cyclic) {
+ 				active->num_completed = 0; /* wrap around */
+ 			} else {
+@@ -399,6 +532,10 @@ static bool axi_dmac_transfer_done(struct axi_dmac_chan *chan,
+ 				active = axi_dmac_active_desc(chan);
+ 			}
+ 		}
++
++		sg->partial_len = 0;
++		if (!axi_dmac_desc_has_partial_len(done_desc))
++			done_desc->have_partial_xfer = false;
+ 	} while (active);
+ 
+ 	return start_next;
+@@ -408,25 +545,81 @@ static irqreturn_t axi_dmac_interrupt_handler(int irq, void *devid)
+ {
+ 	struct axi_dmac *dmac = devid;
+ 	unsigned int pending;
++	unsigned int completed;
+ 	bool start_next = false;
++#ifdef DEBUG_OPENWIFI_ADI_DMA
++	static u32 spurious_irq_count;
++#endif
+ 
+ 	pending = axi_dmac_read(dmac, AXI_DMAC_REG_IRQ_PENDING);
+-	if (!pending)
+-		return IRQ_NONE;
++	if (!pending) {
++		completed = axi_dmac_read(dmac, AXI_DMAC_REG_TRANSFER_DONE);
++#ifdef DEBUG_OPENWIFI_ADI_DMA
++		if ((++spurious_irq_count & 0x3F) == 1)
++			dev_warn_ratelimited(dmac->dma_dev.dev,
++				"[OW_DMA] irq_spurious#%u pending=0 src=0x%x mask=0x%x done=0x%x\n",
++				spurious_irq_count,
++				axi_dmac_read(dmac, AXI_DMAC_REG_IRQ_SOURCE),
++				axi_dmac_read(dmac, AXI_DMAC_REG_IRQ_MASK),
++				completed);
++#endif
++		/*
++		 * Some boards occasionally show pending=0 while TRANSFER_DONE has
++		 * bits set. Treat that as handled so completion retirement can still
++		 * progress and we don't risk spurious-IRQ suppression.
++		 */
++		if (!completed)
++			return IRQ_NONE;
++
++		spin_lock(&dmac->chan.vchan.lock);
++		start_next = axi_dmac_transfer_done(&dmac->chan, completed);
++		if (start_next)
++			axi_dmac_start_transfer(&dmac->chan);
++		spin_unlock(&dmac->chan.vchan.lock);
++		return IRQ_HANDLED;
++	}
+ 
+ 	axi_dmac_write(dmac, AXI_DMAC_REG_IRQ_PENDING, pending);
++#ifdef DEBUG_OPENWIFI_ADI_DMA
++	{
++		static u32 irq_count;
++		if ((++irq_count & 0x1F) == 1)
++			OW_DMA_DBG(dmac->dma_dev.dev,
++				"IRQ#%u pending=0x%x (SOT=%u EOT=%u) done=0x%x\n",
++				irq_count, pending,
++				!!(pending & AXI_DMAC_IRQ_SOT),
++				!!(pending & AXI_DMAC_IRQ_EOT),
++				axi_dmac_read(dmac, AXI_DMAC_REG_TRANSFER_DONE));
++	}
++#endif
+ 
+ 	spin_lock(&dmac->chan.vchan.lock);
+-	/* One or more transfers have finished */
+-	if (pending & AXI_DMAC_IRQ_EOT) {
+-		unsigned int completed;
+-
+-		completed = axi_dmac_read(dmac, AXI_DMAC_REG_TRANSFER_DONE);
++	/*
++	 * On some cyclic S2MM cases we can observe SOT without a matching EOT
++	 * edge for each software segment. Always checking TRANSFER_DONE avoids
++	 * schedule_when_free getting stuck waiting for an EOT-only path.
++	 */
++	completed = axi_dmac_read(dmac, AXI_DMAC_REG_TRANSFER_DONE);
++	if (completed) {
+ 		start_next = axi_dmac_transfer_done(&dmac->chan, completed);
+ 	}
+-	/* Space has become available in the descriptor queue */
+-	if ((pending & AXI_DMAC_IRQ_SOT) || start_next)
++	/* Space has become available in the descriptor queue.
++	 * For S2MM (RX), avoid SOT-driven prefetch to reduce queue pressure.
++	 * Keep SOT prefetch for memory-to-device directions (e.g. TX).
++	 */
++	if ((pending & AXI_DMAC_IRQ_EOT) || start_next ||
++	    ((pending & AXI_DMAC_IRQ_SOT) &&
++	     !axi_dmac_dest_is_mem(&dmac->chan)))
+ 		axi_dmac_start_transfer(&dmac->chan);
++#ifdef DEBUG_OPENWIFI_ADI_DMA
++	if (pending & (AXI_DMAC_IRQ_SOT | AXI_DMAC_IRQ_EOT))
++		OW_DMA_DBG(dmac->dma_dev.dev,
++			"irq_reason pending=0x%x (SOT=%u EOT=%u) start_next=%u\n",
++			pending,
++			!!(pending & AXI_DMAC_IRQ_SOT),
++			!!(pending & AXI_DMAC_IRQ_EOT),
++			start_next);
++#endif
+ 	spin_unlock(&dmac->chan.vchan.lock);
+ 
+ 	return IRQ_HANDLED;
+@@ -498,8 +691,13 @@ static struct axi_dmac_sg *axi_dmac_fill_linear_sg(struct axi_dmac_chan *chan,
+ 	unsigned int segment_size;
+ 	unsigned int len;
+ 
+-	/* Split into multiple equally sized segments if necessary */
+-	num_segments = DIV_ROUND_UP(period_len, chan->max_length);
++	/*
++	 * Split into multiple equally sized segments if necessary.
++	 * chan->max_length can be UINT_MAX, so ensure there are no overflows
++	 * resuting in divide-by-zero errors by casting to u64.
++	 */
++	num_segments = DIV_ROUND_UP_ULL((u64)period_len,
++					(u64)chan->max_length);
+ 	segment_size = DIV_ROUND_UP(period_len, num_segments);
+ 	/* Take care of alignment */
+ 	segment_size = ((segment_size - 1) | chan->length_align_mask) + 1;
+@@ -573,6 +771,21 @@ static struct dma_async_tx_descriptor *axi_dmac_prep_slave_sg(
+ 	return vchan_tx_prep(&chan->vchan, &desc->vdesc, flags);
+ }
+ 
++static int axi_dmac_device_config(struct dma_chan *c,
++			struct dma_slave_config *slave_config)
++{
++	struct axi_dmac_chan *chan = to_axi_dmac_chan(c);
++	struct axi_dmac *dmac = chan_to_axi_dmac(chan);
++
++	/* no configuration required, a sanity check is done instead */
++	if (slave_config->direction != chan->direction) {
++		dev_err(dmac->dma_dev.dev, "Direction not supported by this DMA Channel");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
+ static struct dma_async_tx_descriptor *axi_dmac_prep_dma_cyclic(
+ 	struct dma_chan *c, dma_addr_t buf_addr, size_t buf_len,
+ 	size_t period_len, enum dma_transfer_direction direction,
+@@ -709,6 +922,9 @@ static bool axi_dmac_regmap_rdwr(struct device *dev, unsigned int reg)
+ 	case AXI_DMAC_REG_STATUS:
+ 	case AXI_DMAC_REG_CURRENT_SRC_ADDR:
+ 	case AXI_DMAC_REG_CURRENT_DEST_ADDR:
++	case AXI_DMAC_REG_DBG0:
++	case AXI_DMAC_REG_DBG1:
++	case AXI_DMAC_REG_DBG2:
+ 	case AXI_DMAC_REG_PARTIAL_XFER_LEN:
+ 	case AXI_DMAC_REG_PARTIAL_XFER_ID:
+ 		return true;
+@@ -956,6 +1172,7 @@ static int axi_dmac_probe(struct platform_device *pdev)
+ 	dma_dev->device_tx_status = dma_cookie_status;
+ 	dma_dev->device_issue_pending = axi_dmac_issue_pending;
+ 	dma_dev->device_prep_slave_sg = axi_dmac_prep_slave_sg;
++	dma_dev->device_config = axi_dmac_device_config;
+ 	dma_dev->device_prep_dma_cyclic = axi_dmac_prep_dma_cyclic;
+ 	dma_dev->device_prep_interleaved_dma = axi_dmac_prep_interleaved;
+ 	dma_dev->device_terminate_all = axi_dmac_terminate_all;
+@@ -978,6 +1195,25 @@ static int axi_dmac_probe(struct platform_device *pdev)
+ 	dma_dev->copy_align = (dmac->chan.address_align_mask + 1);
+ 
+ 	axi_dmac_write(dmac, AXI_DMAC_REG_IRQ_MASK, 0x00);
++#ifdef DEBUG_OPENWIFI_ADI_DMA
++	dev_info(&pdev->dev,
++		"[OW_DMA_PROBE] ver=0x%x dir=%u hw_cyc=%u src=%u/%u dest=%u/%u\n",
++		version, dmac->chan.direction, dmac->chan.hw_cyclic,
++		dmac->chan.src_type, dmac->chan.src_width,
++		dmac->chan.dest_type, dmac->chan.dest_width);
++#endif
++
++	if (of_dma_is_coherent(pdev->dev.of_node)) {
++		ret = axi_dmac_read(dmac, AXI_DMAC_REG_COHERENCY_DESC);
++
++		if (version < ADI_AXI_PCORE_VER(4, 4, 'a') ||
++		    !AXI_DMAC_DST_COHERENT_GET(ret)) {
++			dev_err(dmac->dma_dev.dev,
++				"Coherent DMA not supported in hardware");
++			ret = -EINVAL;
++			goto err_clk_disable;
++		}
++	}
+ 
+ 	ret = dma_async_device_register(dma_dev);
+ 	if (ret)

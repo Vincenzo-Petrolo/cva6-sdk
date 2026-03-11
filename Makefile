@@ -104,6 +104,23 @@ $(RISCV)/Image.gz: $(RISCV)/Image
 $(RISCV)/uImage: $(RISCV)/Image.gz $(MKIMAGE)
 	$(MKIMAGE) -A riscv -O linux -T kernel -a $(UIMAGE_LOAD_ADDRESS) -e $(UIMAGE_ENTRY_POINT) -C gzip -n "CV$(XLEN)A6Linux" -d $< $@
 
+u-boot-refresh:
+	@test -x $(CC) || (echo 'Missing $(CC); buildroot host tools are not ready.' && exit 1)
+	make -C u-boot pulp-platform_cheshire_defconfig
+	make -C u-boot CROSS_COMPILE=$(TOOLCHAIN_PREFIX)
+	mkdir -p $(RISCV)
+	cp u-boot/u-boot.bin $(RISCV)/u-boot.bin
+	cp u-boot/u-boot $(RISCV)/
+	$(TOOLCHAIN_PREFIX)objdump -d -S u-boot/u-boot > $(RISCV)/u-boot.dump
+
+uImage-refresh:
+	@test -f $(RISCV)/vmlinux || (echo 'Missing $(RISCV)/vmlinux; rebuild linux first.' && exit 1)
+	@test -x $(OBJCOPY) || (echo 'Missing $(OBJCOPY); buildroot host tools are not ready.' && exit 1)
+	@if [ ! -x $(MKIMAGE) ]; then $(MAKE) u-boot-refresh; fi
+	$(OBJCOPY) -O binary -R .note -R .comment -S $(RISCV)/vmlinux $(RISCV)/Image
+	$(GZIP_BIN) -9 --force $(RISCV)/Image > $(RISCV)/Image.gz
+	$(MKIMAGE) -A riscv -O linux -T kernel -a $(UIMAGE_LOAD_ADDRESS) -e $(UIMAGE_ENTRY_POINT) -C gzip -n "CV$(XLEN)A6Linux" -d $(RISCV)/Image.gz $(RISCV)/uImage
+
 $(RISCV)/u-boot.bin: u-boot/u-boot.bin
 	mkdir -p $(RISCV)
 	cp $< $@
@@ -123,6 +140,14 @@ $(RISCV)/fw_payload.bin: $(RISCV)/u-boot.bin
 	cp opensbi/build/platform/$(PLATFORM)/firmware/fw_payload.bin $(RISCV)/fw_payload.bin
 	# Also bring in dump
 	$(TOOLCHAIN_PREFIX)objdump -d -S  opensbi/build/platform/$(PLATFORM)/firmware/fw_payload.elf > $(RISCV)/fw_payload.dump
+
+fw_payload-refresh:
+	$(MAKE) u-boot-refresh
+	@test -x $(TOOLCHAIN_PREFIX)objdump || (echo 'Missing $(TOOLCHAIN_PREFIX)objdump; buildroot host tools are not ready.' && exit 1)
+	make -B -C opensbi FW_PAYLOAD_PATH=$(RISCV)/u-boot.bin $(sbi-mk)
+	cp opensbi/build/platform/$(PLATFORM)/firmware/fw_payload.elf $(RISCV)/fw_payload.elf
+	cp opensbi/build/platform/$(PLATFORM)/firmware/fw_payload.bin $(RISCV)/fw_payload.bin
+	$(TOOLCHAIN_PREFIX)objdump -d -S opensbi/build/platform/$(PLATFORM)/firmware/fw_payload.elf > $(RISCV)/fw_payload.dump
 
 # OpenSBI for Spike with Linux as payload
 $(RISCV)/spike_fw_payload.elf: PLATFORM=generic
@@ -171,7 +196,7 @@ clean-all: clean
 	rm -rf $(RISCV) riscv-isa-sim/build riscv-tests/build
 	make -C buildroot clean
 
-.PHONY: gcc vmlinux images help fw_payload.bin uImage
+.PHONY: gcc vmlinux images help fw_payload.bin fw_payload-refresh u-boot-refresh uImage uImage-refresh
 
 help:
 	@echo "usage: $(MAKE) [tool/img] ..."
@@ -187,6 +212,8 @@ help:
 	@echo "        make images"
 	@echo "    for specific artefact"
 	@echo "        make [vmlinux|uImage|fw_payload.bin]"
+	@echo "    refresh installed artefacts without re-entering buildroot bootstrap"
+	@echo "        make [u-boot-refresh|uImage-refresh|fw_payload-refresh]"
 	@echo ""
 	@echo "flash firmware and linux images to sd card"
 	@echo "    has to be run as root or with sudo -E:"
