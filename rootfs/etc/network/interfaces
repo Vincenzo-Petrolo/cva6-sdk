@@ -1,7 +1,8 @@
-# configure eth0 with dhcp IP
+# Loopback only — Cheshire has no eth0 (Zynq-only)
 auto lo
 iface lo inet loopback
 
-auto eth0
-iface eth0 inet dhcp
+# TODO: Add wlan0 or other network interface when WiFi client auto-connect is needed
+# auto eth0
+# iface eth0 inet dhcp
 
