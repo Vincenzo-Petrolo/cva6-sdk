@@ -20,20 +20,20 @@ index 5762280..08b7f45 100644
  obj-$(CONFIG_INTERCONNECT)	+= interconnect/
  obj-$(CONFIG_COUNTER)		+= counter/
  obj-$(CONFIG_MOST)		+= most/
-+obj-$(CONFIG_OPENWIFI)		+= sdr.o xpu/xpu.o tx_intf/tx_intf.o rx_intf/rx_intf.o side_ch/side_ch.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o
++obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..ad7435c
+index 0000000..5c579ee
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0xfcc3bec
++#define GIT_REV 0xade0f1e
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
-index 0000000..f08ba76
+index 0000000..7280ee2
 --- /dev/null
 +++ b/drivers/hw_def.h
-@@ -0,0 +1,506 @@
+@@ -0,0 +1,527 @@
 +// Author: Xianjun jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -64,9 +64,30 @@ index 0000000..f08ba76
 +#define OW_PLATFORM_TOKEN_CHESHIRE       "eth,cheshire"
 +#define OW_PLATFORM_TOKEN_CHESHIRE_DEV   "eth,cheshire-dev"
 +
++/**
++ * @brief Case-insensitive substring search (kernel has no strcasestr).
++ */
++static inline const char *ow_strcasestr(const char *haystack, const char *needle)
++{
++  size_t needle_len = strlen(needle);
++
++  if (needle_len == 0) {
++    return haystack;
++  }
++  for (; *haystack; haystack++) {
++    if (strncasecmp(haystack, needle, needle_len) == 0) {
++      return haystack;
++    }
++  }
++  return NULL;
++}
++
 +static inline bool openwifi_platform_id_has_token(const char *platform_id, const char *token)
 +{
-+  return (platform_id && token && strstr(platform_id, token) != NULL);
++  if (!platform_id || !token) {
++    return false;
++  }
++  return ow_strcasestr(platform_id, token) != NULL;
 +}
 +
 +static inline bool openwifi_platform_has_token(const char *fpga_model, const char *root_compatible,
@@ -542,10 +563,10 @@ index 0000000..f08ba76
 +#endif /* __HW_DEF_H_FILE__ */
 diff --git a/drivers/nl80211_testmode_def.h b/drivers/nl80211_testmode_def.h
 new file mode 100644
-index 0000000..f22695e
+index 0000000..ced228c
 --- /dev/null
 +++ b/drivers/nl80211_testmode_def.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,96 @@
 +// Author: Xianjun Jiao
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -557,6 +578,9 @@ index 0000000..f22695e
 + * driver and sdrctl. Keep this driver header as the source of truth because
 + * the kernel-imported build has access to driver/ but not user_space/.
 + */
++
++#ifndef __NL80211_TESTMODE_DEF_H__
++#define __NL80211_TESTMODE_DEF_H__
 +
 +enum openwifi_testmode_attr {
 +	__OPENWIFI_ATTR_INVALID = 0,
@@ -637,6 +661,8 @@ index 0000000..f22695e
 +	[REG_ATTR_ADDR] = { .type = NLA_U32 },
 +	[REG_ATTR_VAL] = { .type = NLA_U32 },
 +};
++
++#endif /* __NL80211_TESTMODE_DEF_H__ */
 diff --git a/drivers/openofdm_rx/openofdm_rx.c b/drivers/openofdm_rx/openofdm_rx.c
 new file mode 100644
 index 0000000..875dbdb
