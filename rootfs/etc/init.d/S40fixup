@@ -6,7 +6,7 @@
 umask 077
 
 start() {
-	ifconfig eth0 hw ether 00:18:3E:02:E3:7F
+	# eth0 MAC fixup removed — Cheshire has no eth0 (Zynq-only)
 	chown root:root /etc/ssh/ssh_host_*
 	chmod 600 /etc/ssh/ssh_host_*key
 }
