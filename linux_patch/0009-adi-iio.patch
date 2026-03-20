@@ -14879,10 +14879,10 @@ index 0000000..6c01098
 +#endif
 diff --git a/drivers/iio/adc/cf_axi_adc.h b/drivers/iio/adc/cf_axi_adc.h
 new file mode 100644
-index 0000000..0c7abe7
+index 0000000..a0f73e8
 --- /dev/null
 +++ b/drivers/iio/adc/cf_axi_adc.h
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,330 @@
 +/*
 + * ADI-AIM ADI ADC Interface Module
 + *
@@ -14896,11 +14896,10 @@ index 0000000..0c7abe7
 +#ifndef ADI_AXI_ADC_H_
 +#define ADI_AXI_ADC_H_
 +
-+/* --- Vanilla Linux 5.10.7 compatibility defines ---
-+ * These symbols exist in ADI's adi-linux-64 fork but not in vanilla.
-+ * CALIBPHASE: removed from channel info_mask so case handlers are dead code.
-+ * IIO_VAL_INT_64: only used in CALIBPHASE path, also dead.
-+ * ADI_AXI_REG_ID: register offset not in vanilla adi-axi-common.h.
++/*
++ * Vanilla Linux 5.10.7 compatibility defines.
++ * Source: adi-linux-64 commit c2f371e014f0 (ADI 2022_R2 branch)
++ * These symbols exist in ADI's fork but not in vanilla 5.10.7.
 + */
 +#ifndef IIO_CHAN_INFO_CALIBPHASE
 +#define IIO_CHAN_INFO_CALIBPHASE		100
@@ -15216,10 +15215,10 @@ index 0000000..0c7abe7
 +#endif /* ADI_AXI_ADC_H_ */
 diff --git a/drivers/iio/adc/cf_axi_adc_core.c b/drivers/iio/adc/cf_axi_adc_core.c
 new file mode 100644
-index 0000000..887a4c4
+index 0000000..64624e9
 --- /dev/null
 +++ b/drivers/iio/adc/cf_axi_adc_core.c
-@@ -0,0 +1,1253 @@
+@@ -0,0 +1,1260 @@
 +/*
 + * AXI_ADC ADI ADC Interface Module
 + *
@@ -15328,6 +15327,10 @@ index 0000000..887a4c4
 +}
 +EXPORT_SYMBOL_GPL(axiadc_idelay_set);
 +
++/* DMA submit/abort stubbed — vanilla 5.10.7 buffer-dma API incompatible.
++ * Theshire DTS has no 'dmas' property so this path is never reached.
++ * Source: adi-linux-64 commit c2f371e014f0
++ */
 +static int axiadc_hw_submit_block(struct iio_dma_buffer_queue *queue,
 +	struct iio_dma_buffer_block *block)
 +{
@@ -15341,6 +15344,7 @@ index 0000000..887a4c4
 +	.abort = axiadc_dma_abort,
 +};
 +
++/* DMA ring setup stubbed — see axiadc_hw_submit_block comment above. */
 +static int axiadc_configure_ring_stream(struct iio_dev *indio_dev,
 +	const char *dma_name)
 +{
@@ -15897,6 +15901,7 @@ index 0000000..887a4c4
 +	}
 +}
 +
++/* axiadc_read_label removed — .read_label added in Linux 5.11, not in vanilla 5.10.7 */
 +
 +static int axiadc_read_event_value(struct iio_dev *indio_dev,
 +	const struct iio_chan_spec *chan, enum iio_event_type type,
@@ -16039,6 +16044,7 @@ index 0000000..887a4c4
 +	.write_event_config = &axiadc_write_event_config,
 +	.debugfs_reg_access = &axiadc_reg_access,
 +	.update_scan_mode = &axiadc_update_scan_mode,
++	/* .read_label removed — not in vanilla 5.10.7 */
 +};
 +
 +struct axiadc_spidev {
