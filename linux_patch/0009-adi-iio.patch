@@ -1,49 +1,60 @@
 diff --git a/drivers/iio/adc/Kconfig b/drivers/iio/adc/Kconfig
-index 17e9ceb9..cd3cfd6d 100644
+index 17e9ceb..14ea01b 100644
 --- a/drivers/iio/adc/Kconfig
 +++ b/drivers/iio/adc/Kconfig
-@@ -1224,3 +1224,26 @@ config XILINX_XADC
+@@ -1224,3 +1224,35 @@ config XILINX_XADC
  	  xilinx-xadc.
  
  endmenu
 +
 +config AD9361
-+	tristate "Analog Devices AD9361/AD9363/AD9364 RF transceiver"
-+	depends on IIO && SPI
++	tristate "Analog Devices AD9361 RF Transceiver driver"
++	depends on SPI
 +	select IIO_BUFFER
-+	select IIO_DMAENGINE if DMA_ENGINE
 +	help
-+	  Say Y or M to enable the IIO driver for ADI’s AD936x RF Agile
-+	  Transceivers (AD9361/AD9363/AD9364) over SPI. The driver exposes
-+	  the transceiver via the IIO subsystem and is configured through
-+	  Device Tree. Typical systems pair it with AXI-DMAC for streaming IQ.
++	  Say Y or M to enable the Analog Devices AD9361 wideband RF transceiver
++	  driver. This driver is required for AD9361-based RF frontends such as
++	  FMCOMMS2/3.
++
 +config AD9361_EXT_BAND_CONTROL
-+	bool "Support for controlling RX/TX band selection by the driver"
++	bool "AD9361 Extended Band Control"
 +	depends on AD9361
++	default y
 +	help
-+	  Say yes here if you want to enable support in the AD9361 driver
-+	  for controlling GPIOs and chip settings to select different bands
-+	  based on the RX/TX LO frequency.
-+	  The GPIOs would usually control external filter banks (high & low
-+	  pass filters for RX filters, and low pass for TX filters).
++	  Enable extended band control support for the AD9361 RF transceiver.
 +
 +	  The functionality aims at trying to be a generic approach that would
 +	  potentially benefit as many designs as possible.
++
++config CF_AXI_ADC
++	tristate "Analog Devices High-Speed AXI ADC driver core"
++	select IIO_BUFFER
++	select IIO_BUFFER_HW_CONSUMER
++	select IIO_BUFFER_DMAENGINE
++	help
++	  Say Y or M to enable the ADI AXI ADC/DAC HDL core driver. This
++	  driver manages the AXI-mapped register interface of ADI FPGA
++	  data-converter cores (axi_ad9361, axi_ad9680, etc.), handling
++	  reset sequencing, channel configuration, digital interface tuning,
++	  and IIO buffer/DMA setup. Required for full RF datapath operation
++	  on platforms using ADI FPGA IP cores with AD9361 or similar.
 diff --git a/drivers/iio/adc/Makefile b/drivers/iio/adc/Makefile
-index 90f94ada..5ccb05dd 100644
+index 90f94ad..5dc8aa2 100644
 --- a/drivers/iio/adc/Makefile
 +++ b/drivers/iio/adc/Makefile
-@@ -111,3 +111,4 @@ obj-$(CONFIG_VIPERBOARD_ADC) += viperboard_adc.o
+@@ -111,3 +111,6 @@ obj-$(CONFIG_VIPERBOARD_ADC) += viperboard_adc.o
  xilinx-xadc-y := xilinx-xadc-core.o xilinx-xadc-events.o
  obj-$(CONFIG_XILINX_XADC) += xilinx-xadc.o
  obj-$(CONFIG_SD_ADC_MODULATOR) += sd_adc_modulator.o
 +obj-$(CONFIG_AD9361)		+= ad9361.o ad9361_conv.o ad9361_ext_band_ctrl.o
++cf_axi_adc-y := cf_axi_adc_core.o
++obj-$(CONFIG_CF_AXI_ADC)	+= cf_axi_adc.o
 diff --git a/drivers/iio/adc/ad9361.c b/drivers/iio/adc/ad9361.c
 new file mode 100644
-index 00000000..8583e7fe
+index 0000000..ebf8f75
 --- /dev/null
 +++ b/drivers/iio/adc/ad9361.c
-@@ -0,0 +1,9651 @@
+@@ -0,0 +1,9688 @@
 +/*
 + * AD9361 Agile RF Transceiver
 + *
@@ -1280,7 +1291,7 @@ index 00000000..8583e7fe
 +	return 0;
 +}
 +
-+static int ad9361_set_tx_atten(struct ad9361_rf_phy *phy, u32 atten_mdb,
++int ad9361_set_tx_atten(struct ad9361_rf_phy *phy, u32 atten_mdb,
 +			       bool tx1, bool tx2, bool immed)
 +{
 +	u8 buf[2];
@@ -1312,8 +1323,9 @@ index 00000000..8583e7fe
 +
 +	return ret;
 +}
++EXPORT_SYMBOL(ad9361_set_tx_atten);
 +
-+static int ad9361_get_tx_atten(struct ad9361_rf_phy *phy, u32 tx_num)
++int ad9361_get_tx_atten(struct ad9361_rf_phy *phy, u32 tx_num)
 +{
 +	u8 buf[2];
 +	int ret = 0;
@@ -1331,6 +1343,7 @@ index 00000000..8583e7fe
 +
 +	return code;
 +}
++EXPORT_SYMBOL(ad9361_get_tx_atten);
 +
 +int ad9361_tx_mute(struct ad9361_rf_phy *phy, u32 state)
 +{
@@ -2875,7 +2888,7 @@ index 00000000..8583e7fe
 +	else
 +		decim = 3;
 +
-+	if (clkrf == (2 * clktf)) {
++	if ((clkrf / 2) == clktf) {
 +		__rx_phase = 0x0E;
 +		switch (txnco_word) {
 +		case 0:
@@ -2910,7 +2923,7 @@ index 00000000..8583e7fe
 +				__rx_phase = 0x1A;
 +			break;
 +		}
-+	} else if (clktf == (2 * clkrf)) {
++	} else if ((clktf / 2) == clkrf) {
 +		__rx_phase = -2;
 +		switch (txnco_word) {
 +		case 0:
@@ -2923,11 +2936,11 @@ index 00000000..8583e7fe
 +			rxnco_word = 3;
 +			break;
 +		}
-+	} else if (clktf == (4 * clkrf)) {
++	} else if ((clktf / 4) == clkrf) {
 +		__rx_phase = -2;
 +		txnco_word = 0;
 +		rxnco_word = 3;
-+	} else if (clkrf == (4 * clktf)) {
++	} else if ((clkrf / 4) == clktf) {
 +		__rx_phase = -2;
 +		txnco_word = 3;
 +		rxnco_word = 0;
@@ -3495,6 +3508,8 @@ index 00000000..8583e7fe
 +			  AGCLL_MAX_INCREASE(~0),  reg);
 +
 +	/* Fast AGC - Peak Detectors and Final Settling */
++  ad9361_spi_writef(spi, REG_AGC_LOCK_LEVEL, ENABLE_DIG_SAT_OVRG, ctrl->f_agc_dig_sat_ovrg_en);
++
 +	reg = ctrl->f_agc_lpf_final_settling_steps;
 +	reg = clamp_t(u32, reg, 0U, 3U);
 +	ad9361_spi_writef(spi, REG_FAST_ENERGY_LOST_THRESH,
@@ -3790,7 +3805,7 @@ index 00000000..8583e7fe
 +  // Setup Control Outs
 +  //************************************************************
 +
-+static int ad9361_ctrl_outs_setup(struct ad9361_rf_phy *phy,
++int ad9361_ctrl_outs_setup(struct ad9361_rf_phy *phy,
 +				  struct ctrl_outs_control *ctrl)
 +{
 +	struct spi_device *spi = phy->spi;
@@ -3800,6 +3815,7 @@ index 00000000..8583e7fe
 +	ad9361_spi_write(spi, REG_CTRL_OUTPUT_POINTER, ctrl->index); // Ctrl Out index
 +	return ad9361_spi_write(spi, REG_CTRL_OUTPUT_ENABLE, ctrl->en_mask); // Ctrl Out [7:0] output enable
 +}
++EXPORT_SYMBOL(ad9361_ctrl_outs_setup);
 +  //************************************************************
 +  // Setup GPO
 +  //************************************************************
@@ -4618,7 +4634,7 @@ index 00000000..8583e7fe
 +	/* Wide BW option: N = 1
 +	 * Set init and steady state values to the same - let user space handle it
 +	 */
-+	val[6] = (x << 3) | y;
++	val[6] = (x << 6) | y;
 +	val[7] = y;
 +
 +	x = ad9361_spi_readf(spi, REG_RX_LOOP_FILTER_3 + offs, LOOP_FILTER_R3(~0));
@@ -4985,6 +5001,11 @@ index 00000000..8583e7fe
 +		return 0;
 +}
 +
++static void ad9361_clk_disable(void *clk)
++{
++	clk_disable_unprepare(clk);
++}
++
 +static int ad9361_setup(struct ad9361_rf_phy *phy)
 +{
 +	struct ad9361_rf_phy_state *st = phy->state;
@@ -5049,6 +5070,10 @@ index 00000000..8583e7fe
 +
 +	ret = clk_prepare_enable(phy->clk_refin);
 +	if (ret < 0)
++		return ret;
++
++	ret = devm_add_action_or_reset(dev, ad9361_clk_disable, phy->clk_refin);
++	if (ret)
 +		return ret;
 +
 +	ret = clk_set_rate(phy->clks[BB_REFCLK], ref_freq);
@@ -5150,6 +5175,10 @@ index 00000000..8583e7fe
 +	if (ret < 0)
 +		return ret;
 +
++	ret = devm_add_action_or_reset(dev, ad9361_clk_disable, phy->clks[RX_RFPLL]);
++	if (ret)
++		return ret;
++
 +	/* Skip quad cal here we do it later again */
 +	st->last_tx_quad_cal_freq = pd->tx_synth_freq;
 +	ret = clk_set_rate(phy->clks[TX_RFPLL], ad9361_to_clk(pd->tx_synth_freq));
@@ -5161,6 +5190,10 @@ index 00000000..8583e7fe
 +
 +	ret = clk_prepare_enable(phy->clks[TX_RFPLL]);
 +	if (ret < 0)
++		return ret;
++
++	ret = devm_add_action_or_reset(dev, ad9361_clk_disable, phy->clks[TX_RFPLL]);
++	if (ret)
 +		return ret;
 +
 +	clk_set_parent(phy->clks[RX_RFPLL],
@@ -5281,7 +5314,7 @@ index 00000000..8583e7fe
 +
 +}
 +
-+static int ad9361_do_calib_run(struct ad9361_rf_phy *phy, u32 cal, int arg)
++int ad9361_do_calib_run(struct ad9361_rf_phy *phy, u32 cal, int arg)
 +{
 +	struct ad9361_rf_phy_state *st = phy->state;
 +	int ret;
@@ -5314,6 +5347,7 @@ index 00000000..8583e7fe
 +
 +	return ret;
 +}
++EXPORT_SYMBOL(ad9361_do_calib_run);
 +
 +static int ad9361_update_rf_bandwidth(struct ad9361_rf_phy *phy,
 +				     u32 rf_rx_bw, u32 rf_tx_bw)
@@ -5786,7 +5820,10 @@ index 00000000..8583e7fe
 +static int ad9361_get_clk_scaler(struct clk_hw *hw)
 +{
 +	struct refclk_scale *clk_priv = to_clk_priv(hw);
++	struct ad9361_rf_phy *phy = clk_priv->phy;
++	struct ad9361_phy_platform_data *pd = phy->pdata;
 +	struct spi_device *spi = clk_priv->spi;
++	const bool lvds_mode = pd->port_ctrl.pp_conf[2] & LVDS_MODE;
 +	u32 tmp, tmp1;
 +
 +	switch (clk_priv->source) {
@@ -5851,6 +5888,8 @@ index 00000000..8583e7fe
 +			tmp = (1 << (tmp - 1));
 +
 +		return ad9361_set_muldiv(clk_priv, 1, tmp);
++	case PL_INTF_CLK:
++		return ad9361_set_muldiv(clk_priv, (ad9361_uses_rx2tx2(phy) + 1) << lvds_mode, 1);
 +	default:
 +		return -EINVAL;
 +	}
@@ -6019,6 +6058,8 @@ index 00000000..8583e7fe
 +			return ad9361_spi_writef(spi, REG_TX_ENABLE_FILTER_CTRL,
 +					TX_FIR_ENABLE_INTERPOLATION(~0), tmp);
 +		break;
++	case PL_INTF_CLK:
++		break;
 +	default:
 +		return -EINVAL;
 +	}
@@ -6092,6 +6133,11 @@ index 00000000..8583e7fe
 +static const struct clk_ops refclk_scale_ops = {
 +	.round_rate = ad9361_clk_factor_round_rate,
 +	.set_rate = ad9361_clk_factor_set_rate,
++	.recalc_rate = ad9361_clk_factor_recalc_rate,
++};
++
++static const struct clk_ops pl_intf_clk_ops = {
++	.round_rate = ad9361_clk_factor_round_rate,
 +	.recalc_rate = ad9361_clk_factor_recalc_rate,
 +};
 +
@@ -6616,6 +6662,9 @@ index 00000000..8583e7fe
 +	case TX_RFPLL:
 +		init.ops = &rfpll_clk_ops;
 +		break;
++	case PL_INTF_CLK:
++		init.ops = &pl_intf_clk_ops;
++		break;
 +	default:
 +		init.ops = &refclk_scale_ops;
 +	}
@@ -6642,6 +6691,20 @@ index 00000000..8583e7fe
 +		clk_get_rate(phy->clks[i]);
 +
 +	return 0;
++}
++
++static void ad9361_unregister_rx_notifier(void *data)
++{
++	struct ad9361_rf_phy *phy = data;
++
++	clk_notifier_unregister(phy->clks[RX_RFPLL], &phy->clk_nb_rx);
++}
++
++static void ad9361_unregister_tx_notifier(void *data)
++{
++	struct ad9361_rf_phy *phy = data;
++
++	clk_notifier_unregister(phy->clks[TX_RFPLL], &phy->clk_nb_tx);
 +}
 +
 +static int register_clocks(struct ad9361_rf_phy *phy)
@@ -6732,6 +6795,9 @@ index 00000000..8583e7fe
 +	ad9361_clk_register(phy, "-tx_sampl_clk", "-clktf_clk", NULL,
 +		flags | CLK_IGNORE_UNUSED, TX_SAMPL_CLK);
 +
++	ad9361_clk_register(phy, "-pl_intf_clk", "-tx_sampl_clk", NULL,
++		flags | CLK_IGNORE_UNUSED, PL_INTF_CLK);
++
 +	ad9361_clk_register(phy, "-rx_rfpll_int", "-rx_refclk", NULL,
 +		flags | CLK_IGNORE_UNUSED, RX_RFPLL_INT);
 +
@@ -6751,9 +6817,17 @@ index 00000000..8583e7fe
 +	if (ret < 0)
 +		return ret;
 +
++	ret = devm_add_action_or_reset(&phy->spi->dev, ad9361_unregister_rx_notifier, phy);
++	if (ret)
++		return ret;
++
 +	phy->clk_nb_tx.notifier_call = ad9361_tx_rfpll_rate_change;
 +	ret = clk_notifier_register(phy->clks[TX_RFPLL], &phy->clk_nb_tx);
 +	if (ret < 0)
++		return ret;
++
++	ret = devm_add_action_or_reset(&phy->spi->dev, ad9361_unregister_tx_notifier, phy);
++	if (ret)
 +		return ret;
 +
 +	return 0;
@@ -6803,7 +6877,7 @@ index 00000000..8583e7fe
 +		this_attr->address != AD9361_ENSM_MODE)
 +		return -EINVAL;
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +
 +	switch ((u32)this_attr->address) {
 +	case AD9361_RF_RX_BANDWIDTH:
@@ -7064,7 +7138,7 @@ index 00000000..8583e7fe
 +		ret = -EINVAL;
 +	}
 +
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return ret ? ret : len;
 +}
@@ -7081,7 +7155,7 @@ index 00000000..8583e7fe
 +	unsigned long clk[6];
 +	u64 delta;
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +	switch ((u32)this_attr->address) {
 +	case AD9361_RF_RX_BANDWIDTH:
 +		ret = sprintf(buf, "%u\n", st->current_rx_bw_Hz);
@@ -7199,7 +7273,7 @@ index 00000000..8583e7fe
 +	default:
 +		ret = -EINVAL;
 +	}
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return ret;
 +}
@@ -7370,14 +7444,14 @@ index 00000000..8583e7fe
 +	struct ad9361_rf_phy *phy = iio_priv(indio_dev);
 +	int ret;
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +	if (readval == NULL) {
 +		ret = ad9361_spi_write(phy->spi, reg, writeval);
 +	} else {
 +		*readval =  ad9361_spi_read(phy->spi, reg);
 +		ret = 0;
 +	}
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return ret;
 +}
@@ -7430,7 +7504,7 @@ index 00000000..8583e7fe
 +			break;
 +	}
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +	switch (private) {
 +	case LOEXT_FREQ:
 +		switch (chan->channel) {
@@ -7526,7 +7600,7 @@ index 00000000..8583e7fe
 +
 +		break;
 +	}
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return ret ? ret : len;
 +}
@@ -7542,7 +7616,7 @@ index 00000000..8583e7fe
 +	size_t len;
 +	int ret = 0;
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +	switch (private) {
 +	case LOEXT_FREQ:
 +		val = ad9361_from_clk(clk_get_rate(phy->clks[chan->channel ?
@@ -7559,7 +7633,7 @@ index 00000000..8583e7fe
 +			len += sprintf(buf + len, "%u%c", faslock_vals[i],
 +				       i == 15 ? '\n' : ',');
 +
-+		mutex_unlock(&indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		return len;
 +		}
 +	case LOEXT_RECALL:
@@ -7599,14 +7673,14 @@ index 00000000..8583e7fe
 +		}
 +
 +		len = sprintf(buf, "[%llu 1 %llu]\n", min, max);
-+		mutex_unlock(&indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		return len;
 +		}
 +	default:
 +		ret = 0;
 +
 +	}
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return ret < 0 ? ret : sprintf(buf, "%llu\n", val);
 +}
@@ -7736,7 +7810,7 @@ index 00000000..8583e7fe
 +				    const struct iio_chan_spec *chan,
 +				    const char *buf, size_t len)
 +{
-+//	struct ad9361_rf_phy *phy = iio_priv(indio_dev);
++	struct ad9361_rf_phy *phy = iio_priv(indio_dev);
 +	u64 readin;
 +	int ret = 0;
 +
@@ -7744,7 +7818,7 @@ index 00000000..8583e7fe
 +	if (ret)
 +		return ret;
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +	switch (chan->channel) {
 +	case 0:
 +
@@ -7758,7 +7832,7 @@ index 00000000..8583e7fe
 +		ret = -EINVAL;
 +		ret = 0;
 +	}
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return ret ? ret : len;
 +}
@@ -7773,14 +7847,14 @@ index 00000000..8583e7fe
 +	int val;
 +	int ret = 0;
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +
 +	rssi.ant = ad9361_1rx1tx_channel_map(phy, false, chan->channel + 1);
 +	rssi.duration = 1;
 +	ret = ad9361_read_rssi(phy, &rssi);
 +	val = rssi.symbol;
 +
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return ret < 0 ? ret : sprintf(buf, "%u.%02u dB\n",
 +			val / rssi.multiplier, val % rssi.multiplier);
@@ -7803,7 +7877,7 @@ index 00000000..8583e7fe
 +	u32 val;
 +	int ret;
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +	ret = ad9361_spi_readm(phy->spi, REG_TX_RSSI_LSB,
 +			reg_val_buf, ARRAY_SIZE(reg_val_buf));
 +
@@ -7817,7 +7891,7 @@ index 00000000..8583e7fe
 +	default:
 +		ret = -EINVAL;
 +	}
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	val *= RSSI_RESOLUTION;
 +
@@ -7860,7 +7934,7 @@ index 00000000..8583e7fe
 +	struct ad9361_rf_phy *phy = iio_priv(indio_dev);
 +	int ret;
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +	switch (m) {
 +	case IIO_CHAN_INFO_HARDWAREGAIN:
 +		if (chan->output) {
@@ -7938,7 +8012,7 @@ index 00000000..8583e7fe
 +	}
 +
 +out_unlock:
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return ret;
 +};
@@ -7957,7 +8031,7 @@ index 00000000..8583e7fe
 +	if (st->curr_ensm_state == ENSM_STATE_SLEEP)
 +		return -EINVAL;
 +
-+	mutex_lock(&indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +	switch (mask) {
 +	case IIO_CHAN_INFO_HARDWAREGAIN:
 +		if (chan->output) {
@@ -8012,7 +8086,7 @@ index 00000000..8583e7fe
 +		ret = -EINVAL;
 +	}
 +out:
-+	mutex_unlock(&indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return ret;
 +}
@@ -8208,10 +8282,10 @@ index 00000000..8583e7fe
 +
 +	} else if (entry->cmd == DBGFS_RXGAIN_1 || entry->cmd == DBGFS_RXGAIN_2) {
 +		struct rf_rx_gain rx_gain = {0};
-+		mutex_lock(&phy->indio_dev->mlock);
++		mutex_lock(&phy->lock);
 +		ret = ad9361_get_rx_gain(phy, (entry->cmd == DBGFS_RXGAIN_1) ?
 +				1 : 2, &rx_gain);
-+		mutex_unlock(&phy->indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		if (ret < 0)
 +			return ret;
 +
@@ -8267,7 +8341,7 @@ index 00000000..8583e7fe
 +	case DBGFS_INIT:
 +		if (!(ret == 1 && val == 1))
 +			return -EINVAL;
-+		mutex_lock(&phy->indio_dev->mlock);
++		mutex_lock(&phy->lock);
 +		clk_set_rate(phy->clks[TX_SAMPL_CLK], 1);
 +		clk_set_parent(phy->clks[RX_RFPLL], phy->clk_ext_lo_rx);
 +		clk_set_parent(phy->clks[TX_RFPLL], phy->clk_ext_lo_tx);
@@ -8276,7 +8350,7 @@ index 00000000..8583e7fe
 +		ad9361_clks_disable(phy);
 +		ad9361_clear_state(phy);
 +		ret = ad9361_setup(phy);
-+		mutex_unlock(&phy->indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		if (ret < 0)
 +			return ret;
 +
@@ -8284,9 +8358,9 @@ index 00000000..8583e7fe
 +	case DBGFS_LOOPBACK:
 +		if (ret != 1)
 +			return -EINVAL;
-+		mutex_lock(&phy->indio_dev->mlock);
++		mutex_lock(&phy->lock);
 +		ret = ad9361_bist_loopback(phy, val);
-+		mutex_unlock(&phy->indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		if (ret < 0)
 +			return ret;
 +
@@ -8295,9 +8369,9 @@ index 00000000..8583e7fe
 +	case DBGFS_BIST_PRBS:
 +		if (ret != 1)
 +			return -EINVAL;
-+		mutex_lock(&phy->indio_dev->mlock);
++		mutex_lock(&phy->lock);
 +		ret = ad9361_bist_prbs(phy, val);
-+		mutex_unlock(&phy->indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		if (ret < 0)
 +			return ret;
 +
@@ -8306,9 +8380,9 @@ index 00000000..8583e7fe
 +	case DBGFS_BIST_TONE:
 +		if (ret != 4)
 +			return -EINVAL;
-+		mutex_lock(&phy->indio_dev->mlock);
++		mutex_lock(&phy->lock);
 +		ret = ad9361_bist_tone(phy, val, val2, val3, val4);
-+		mutex_unlock(&phy->indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		if (ret < 0)
 +			return ret;
 +
@@ -8317,9 +8391,9 @@ index 00000000..8583e7fe
 +	case DBGFS_MCS:
 +		if (ret != 1)
 +			return -EINVAL;
-+		mutex_lock(&phy->indio_dev->mlock);
++		mutex_lock(&phy->lock);
 +		ret = ad9361_mcs(phy, val);
-+		mutex_unlock(&phy->indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		if (ret < 0)
 +			return ret;
 +
@@ -8331,10 +8405,10 @@ index 00000000..8583e7fe
 +
 +		if (phy->pdata->cal_sw1_gpio &&
 +			phy->pdata->cal_sw2_gpio) {
-+			mutex_lock(&phy->indio_dev->mlock);
++			mutex_lock(&phy->lock);
 +			gpiod_set_value(phy->pdata->cal_sw1_gpio, !!(val & BIT(0)));
 +			gpiod_set_value(phy->pdata->cal_sw2_gpio, !!(val & BIT(1)));
-+			mutex_unlock(&phy->indio_dev->mlock);
++			mutex_unlock(&phy->lock);
 +		} else {
 +			return -ENODEV;
 +		}
@@ -8344,9 +8418,9 @@ index 00000000..8583e7fe
 +	case DBGFS_DIGITAL_TUNE:
 +		if (ret != 2)
 +			return -EINVAL;
-+		mutex_lock(&phy->indio_dev->mlock);
++		mutex_lock(&phy->lock);
 +		ret = ad9361_dig_tune(phy, val, val2);
-+		mutex_unlock(&phy->indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		if (ret < 0)
 +			return ret;
 +
@@ -8383,7 +8457,7 @@ index 00000000..8583e7fe
 +			return -EINVAL;
 +		}
 +
-+		mutex_lock(&phy->indio_dev->mlock);
++		mutex_lock(&phy->lock);
 +		ctrl->gpo_manual_mode_enable_mask &= ~mask;
 +		ctrl->gpo_manual_mode_enable_mask |= val3;
 +
@@ -8403,7 +8477,7 @@ index 00000000..8583e7fe
 +		if (!(val3 & GPO_MANUAL_SELECT))
 +			ad9361_spi_write(phy->spi, REG_EXTERNAL_LNA_CTRL,
 +					 val3 | GPO_MANUAL_SELECT);
-+		mutex_unlock(&phy->indio_dev->mlock);
++		mutex_unlock(&phy->lock);
 +		if (ret < 0)
 +			return ret;
 +
@@ -8623,10 +8697,10 @@ index 00000000..8583e7fe
 +			   &pdata->tdd_skip_vco_cal);
 +
 +	ad9361_of_get_u32(iodev, np, "adi,tx-fastlock-delay-ns", 0,
-+			  &pdata->rx_fastlock_delay_ns);
++			  &pdata->tx_fastlock_delay_ns);
 +
 +	ad9361_of_get_u32(iodev, np, "adi,rx-fastlock-delay-ns", 0,
-+			  &pdata->tx_fastlock_delay_ns);
++			  &pdata->rx_fastlock_delay_ns);
 +
 +	ad9361_of_get_bool(iodev, np, "adi,rx-fastlock-pincontrol-enable",
 +			   &pdata->trx_fastlock_pinctrl_en[0]);
@@ -8895,6 +8969,8 @@ index 00000000..8583e7fe
 +	ad9361_of_get_u32(iodev, np, "adi,fagc-lock-level-gain-increase-upper-limit", 5,
 +			&pdata->gain_ctrl.f_agc_lock_level_gain_increase_upper_limit); /* 0x118 0..63 */
 +		/* Fast AGC - Peak Detectors and Final Settling */
++  ad9361_of_get_bool(iodev, np, "adi,fagc-dig-sat-ovrg-enable",
++	    &pdata->gain_ctrl.f_agc_dig_sat_ovrg_en); /* 0x101:7 (full table) */
 +	ad9361_of_get_u32(iodev, np, "adi,fagc-lpf-final-settling-steps", 1,
 +			&pdata->gain_ctrl.f_agc_lpf_final_settling_steps); /* 0x112:6 0..3 (Post Lock Level Step)*/
 +	ad9361_of_get_u32(iodev, np, "adi,fagc-lmt-final-settling-steps", 1,
@@ -9392,7 +9468,7 @@ index 00000000..8583e7fe
 +	if (IS_ERR_OR_NULL(table))
 +		return PTR_ERR(table);
 +
-+	mutex_lock(&phy->indio_dev->mlock);
++	mutex_lock(&phy->lock);
 +	ad9361_free_gt(phy, phy->gt_info);
 +
 +	st->current_table = -1;
@@ -9402,7 +9478,7 @@ index 00000000..8583e7fe
 +		clk_get_rate(phy->clks[RX_RFPLL])),
 +		GT_RX1 + GT_RX2);
 +
-+	mutex_unlock(&phy->indio_dev->mlock);
++	mutex_unlock(&phy->lock);
 +
 +	return count;
 +}
@@ -9476,6 +9552,16 @@ index 00000000..8583e7fe
 +	return t.effective_speed_hz;
 +}
 +
++static void ad9361_remove_ext_band_control(void *phy)
++{
++	ad9361_unregister_ext_band_control(phy);
++}
++
++static void ad9361_clk_del_provider(void *of_node)
++{
++	of_clk_del_provider(of_node);
++}
++
 +static int ad9361_probe(struct spi_device *spi)
 +{
 +	struct iio_dev *indio_dev;
@@ -9505,6 +9591,7 @@ index 00000000..8583e7fe
 +	phy->indio_dev = indio_dev;
 +	phy->spi = spi;
 +	phy->clk_refin = clk;
++	mutex_init(&phy->lock);
 +
 +	ad9361_init_state(phy);
 +
@@ -9539,6 +9626,10 @@ index 00000000..8583e7fe
 +			 "%s: failed to initialize ext band control\n",
 +			 __func__);
 +
++	ret = devm_add_action_or_reset(&spi->dev, ad9361_remove_ext_band_control, phy);
++	if (ret)
++		return ret;
++
 +	phy->gt_info = ad9361_adi_gt_info;
 +
 +	ad9361_request_gt(phy, NULL);
@@ -9546,14 +9637,8 @@ index 00000000..8583e7fe
 +	ad9361_reset(phy);
 +
 +	hz = ad9361_spi_check(spi);
-+	if (hz < 0) {
++	if (hz < 0)
 +		return hz;
-+	}
-+
-+	ret = ad9361_spi_read(spi, REG_PRODUCT_ID);
-+	if (ret < 0) {
-+		return ret;
-+	}
 +
 +	rev = ret & REV_MASK;
 +
@@ -9572,12 +9657,16 @@ index 00000000..8583e7fe
 +
 +	ret = ad9361_setup(phy);
 +	if (ret < 0)
-+		goto out_unregister_notifier;
++		return ret;
 +
 +	ret = of_clk_add_provider(spi->dev.of_node,
 +			    of_clk_src_onecell_get, &phy->clk_data);
 +	if (ret)
-+		goto out_disable_clocks;
++		return ret;
++
++	ret = devm_add_action_or_reset(&spi->dev, ad9361_clk_del_provider, spi->dev.of_node);
++	if (ret)
++		return ret;
 +
 +	sysfs_bin_attr_init(&phy->bin);
 +	phy->bin.attr.name = "filter_fir_config";
@@ -9606,19 +9695,18 @@ index 00000000..8583e7fe
 +	indio_dev->num_channels = ARRAY_SIZE(ad9361_phy_chan) -
 +		(phy->pdata->rx2tx2 ? 0 : 2);
 +
-+	ret = iio_device_register(indio_dev);
++	ret = devm_iio_device_register(&spi->dev, indio_dev);
 +	if (ret < 0)
-+		goto out_clk_del_provider;
++		return ret;
 +	ret = ad9361_register_axi_converter(phy);
 +	if (ret < 0)
-+		goto out_iio_device_unregister;
++		return ret;
 +	ret = sysfs_create_bin_file(&indio_dev->dev.kobj, &phy->bin);
 +	if (ret < 0)
-+		goto out_iio_device_unregister;
++		return ret;
 +	ret = sysfs_create_bin_file(&indio_dev->dev.kobj, &phy->bin_gt);
 +	if (ret < 0)
-+		goto out_iio_device_unregister;
-+
++		return ret;
 +
 +	ret = ad9361_register_debugfs(indio_dev);
 +	if (ret < 0)
@@ -9632,34 +9720,6 @@ index 00000000..8583e7fe
 +				__func__, rev);
 +
 +	return 0;
-+
-+out_iio_device_unregister:
-+	iio_device_unregister(indio_dev);
-+out_clk_del_provider:
-+	of_clk_del_provider(spi->dev.of_node);
-+out_disable_clocks:
-+	ad9361_clks_disable(phy);
-+out_unregister_notifier:
-+	clk_notifier_unregister(phy->clks[RX_RFPLL], &phy->clk_nb_rx);
-+	clk_notifier_unregister(phy->clks[TX_RFPLL], &phy->clk_nb_tx);
-+
-+	return ret;
-+}
-+
-+static int ad9361_remove(struct spi_device *spi)
-+{
-+	struct ad9361_rf_phy *phy = ad9361_spi_to_phy(spi);
-+
-+	ad9361_unregister_ext_band_control(phy);
-+	sysfs_remove_bin_file(&phy->indio_dev->dev.kobj, &phy->bin_gt);
-+	sysfs_remove_bin_file(&phy->indio_dev->dev.kobj, &phy->bin);
-+	iio_device_unregister(phy->indio_dev);
-+	of_clk_del_provider(spi->dev.of_node);
-+	clk_notifier_unregister(phy->clks[RX_RFPLL], &phy->clk_nb_rx);
-+	clk_notifier_unregister(phy->clks[TX_RFPLL], &phy->clk_nb_tx);
-+	ad9361_clks_disable(phy);
-+
-+	return 0;
 +}
 +
 +static const struct spi_device_id ad9361_id[] = {
@@ -9671,23 +9731,11 @@ index 00000000..8583e7fe
 +};
 +MODULE_DEVICE_TABLE(spi, ad9361_id);
 +
-+static const struct of_device_id ad9361_of_match[] = {
-+	{ .compatible = "adi,ad9361" },
-+	{ .compatible = "adi,ad9364" },
-+	{ .compatible = "adi,ad9361-2x" },
-+	{ .compatible = "adi,ad9363a" },
-+	{}
-+};
-+MODULE_DEVICE_TABLE(of, ad9361_of_match);
-+
 +static struct spi_driver ad9361_driver = {
 +	.driver = {
-+		.name		= "ad9361",
-+		.owner		= THIS_MODULE,
-+		.of_match_table	= ad9361_of_match,
++		.name	= "ad9361",
 +	},
 +	.probe		= ad9361_probe,
-+	.remove		= ad9361_remove,
 +	.id_table	= ad9361_id,
 +};
 +module_spi_driver(ad9361_driver);
@@ -9697,10 +9745,10 @@ index 00000000..8583e7fe
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/iio/adc/ad9361.h b/drivers/iio/adc/ad9361.h
 new file mode 100644
-index 00000000..0f46c1bb
+index 0000000..0f50a73
 --- /dev/null
 +++ b/drivers/iio/adc/ad9361.h
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,223 @@
 +/*
 + * AD9361
 + *
@@ -9923,12 +9971,13 @@ index 00000000..0f46c1bb
 +#endif
 +
 +#endif
++
 diff --git a/drivers/iio/adc/ad9361_conv.c b/drivers/iio/adc/ad9361_conv.c
 new file mode 100644
-index 00000000..1902e7d0
+index 0000000..9c18f43
 --- /dev/null
 +++ b/drivers/iio/adc/ad9361_conv.c
-@@ -0,0 +1,808 @@
+@@ -0,0 +1,820 @@
 +/*
 + * AD9361 Agile RF Transceiver
 + *
@@ -10124,8 +10173,7 @@ index 00000000..1902e7d0
 +	  .indexed = 1,							\
 +	  .channel = _chan,						\
 +	  .info_mask_separate = BIT(IIO_CHAN_INFO_CALIBSCALE) |		\
-+			BIT(IIO_CHAN_INFO_CALIBBIAS) |			\
-+			BIT(IIO_CHAN_INFO_CALIBPHASE),			\
++			BIT(IIO_CHAN_INFO_CALIBBIAS),			\
 +	  .info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SAMP_FREQ),	\
 +	  .ext_info = axiadc_ext_info,					\
 +	  .scan_index = _si,						\
@@ -10380,7 +10428,15 @@ index 00000000..1902e7d0
 +				 unsigned long max_freq,
 +				 enum dig_tune_flags flags, bool tx)
 +{
-+	static const unsigned int rates[3] = {25000000U, 40000000U, 61440000U};
++	/*
++	 * Keep digital tune sweep hardcoded to 25/40/40 MHz on this tree.
++	 * 61.44 MHz is intentionally excluded due to known instability on
++	 * ZCU104-class LVDS integrations.
++	 */
++	// static const unsigned int rates[3] = {25000000U, 40000000U, 40000000U};
++	static const unsigned int rates[3] = {
++		25000000U, 40000000U, 40000000U
++	};
 +	struct axiadc_converter *conv = spi_get_drvdata(phy->spi);
 +	unsigned int s0, s1, c0, c1;
 +	unsigned int i, j, r;
@@ -10695,6 +10751,11 @@ index 00000000..1902e7d0
 +struct ad9361_rf_phy* ad9361_spi_to_phy(struct spi_device *spi)
 +{
 +	struct axiadc_converter *conv = spi_get_drvdata(spi);
++
++	if (!conv) {
++		return NULL;
++	}
++
 +	return conv->phy;
 +}
 +EXPORT_SYMBOL(ad9361_spi_to_phy);
@@ -10739,10 +10800,10 @@ index 00000000..1902e7d0
 +#endif /* CONFIG_CF_AXI_ADC */
 diff --git a/drivers/iio/adc/ad9361_ext_band_ctrl.c b/drivers/iio/adc/ad9361_ext_band_ctrl.c
 new file mode 100644
-index 00000000..5315e785
+index 0000000..3a86ff0
 --- /dev/null
 +++ b/drivers/iio/adc/ad9361_ext_band_ctrl.c
-@@ -0,0 +1,718 @@
+@@ -0,0 +1,728 @@
 +/*
 + * AD9361 Agile RF Transceiver
 + *   Module for controlling external filter banks via GPIOs
@@ -11110,18 +11171,22 @@ index 00000000..5315e785
 +			break;
 +
 +		new = devm_kzalloc(dev, sizeof(*new), GFP_KERNEL);
-+		if (!new)
++		if (!new) {
++			of_node_put(child);
 +			return -ENOMEM;
++		}
 +
 +		dev_dbg(dev, "Found '%s'\n", child->name);
 +		ret = ad9361_parse_setting_with_freq_range(dev, child,
 +						ctl, new);
 +		if (ret < 0) {
++			of_node_put(child);
 +			dev_err(dev, "Error while parsing '%s': %d\n",
 +				child->name, ret);
 +			return ret;
 +		}
 +		list_add_tail(&new->list, lst);
++		of_node_put(child);
 +	}
 +
 +	return cnt;
@@ -11145,12 +11210,18 @@ index 00000000..5315e785
 +
 +		ctl->hooks[i] = devm_kzalloc(dev, sizeof(*ctl->hooks[i]),
 +					     GFP_KERNEL);
-+		if (!ctl->hooks[i])
++		if (!ctl->hooks[i]) {
++			of_node_put(child);
 +			return -ENOMEM;
++		}
 +
 +		ret = ad9361_parse_setting(dev, child, ctl, ctl->hooks[i], NULL);
-+		if (ret < 0)
++		if (ret < 0) {
++			of_node_put(child);
 +			return ret;
++		}
++
++		of_node_put(child);
 +	}
 +	return 0;
 +}
@@ -11463,10 +11534,10 @@ index 00000000..5315e785
 +}
 diff --git a/drivers/iio/adc/ad9361_private.h b/drivers/iio/adc/ad9361_private.h
 new file mode 100644
-index 00000000..dfffc4fa
+index 0000000..99dadf8
 --- /dev/null
 +++ b/drivers/iio/adc/ad9361_private.h
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,502 @@
 +/*
 + * AD9361 - Private definitions to be used only in the ad9361.c file
 + *
@@ -11596,6 +11667,7 @@ index 00000000..dfffc4fa
 +	u8 f_agc_lp_thresh_increment_steps; /* 0x117 1..8 */
 +
 +	/* Fast AGC - Lock Level */
++  bool f_agc_dig_sat_ovrg_en; /* 0x101:7 Enable digital saturation cause gain decrease */
 +	u8 f_agc_lock_level; /* NOT USED: 0x101 0..-127 dBFS same as agc_inner_thresh_high */
 +	bool f_agc_lock_level_lmt_gain_increase_en; /* 0x111:6 */
 +	u8 f_agc_lock_level_gain_increase_upper_limit; /* 0x118 0..63 */
@@ -11970,7 +12042,7 @@ index 00000000..dfffc4fa
 +
 diff --git a/drivers/iio/adc/ad9361_regs.h b/drivers/iio/adc/ad9361_regs.h
 new file mode 100644
-index 00000000..6c010985
+index 0000000..6c01098
 --- /dev/null
 +++ b/drivers/iio/adc/ad9361_regs.h
 @@ -0,0 +1,2831 @@
@@ -14805,9 +14877,1605 @@ index 00000000..6c010985
 +#define MAX_TX_ATTENUATION_DB		89750
 +
 +#endif
+diff --git a/drivers/iio/adc/cf_axi_adc.h b/drivers/iio/adc/cf_axi_adc.h
+new file mode 100644
+index 0000000..0c7abe7
+--- /dev/null
++++ b/drivers/iio/adc/cf_axi_adc.h
+@@ -0,0 +1,331 @@
++/*
++ * ADI-AIM ADI ADC Interface Module
++ *
++ * Copyright 2012-2017 Analog Devices Inc.
++ *
++ * Licensed under the GPL-2.
++ *
++ * http://wiki.analog.com/resources/fpga/xilinx/fmc/ad9467
++ */
++
++#ifndef ADI_AXI_ADC_H_
++#define ADI_AXI_ADC_H_
++
++/* --- Vanilla Linux 5.10.7 compatibility defines ---
++ * These symbols exist in ADI's adi-linux-64 fork but not in vanilla.
++ * CALIBPHASE: removed from channel info_mask so case handlers are dead code.
++ * IIO_VAL_INT_64: only used in CALIBPHASE path, also dead.
++ * ADI_AXI_REG_ID: register offset not in vanilla adi-axi-common.h.
++ */
++#ifndef IIO_CHAN_INFO_CALIBPHASE
++#define IIO_CHAN_INFO_CALIBPHASE		100
++#endif
++#ifndef IIO_VAL_INT_64
++#define IIO_VAL_INT_64				IIO_VAL_INT
++#endif
++#ifndef ADI_AXI_REG_ID
++#define ADI_AXI_REG_ID				0x0004
++#endif
++
++#include <linux/fpga/adi-axi-common.h>
++#include <linux/iio/iio.h>
++
++/* ADC COMMON */
++
++#define ADI_REG_CONFIG 			0x000C
++#define ADI_IQCORRECTION_DISABLE	(1 << 0)
++#define ADI_DCFILTER_DISABLE		(1 << 1)
++#define ADI_DATAFORMAT_DISABLE		(1 << 2)
++#define ADI_USERPORTS_DISABLE		(1 << 3)
++#define ADI_MODE_1R1T			(1 << 4)
++#define ADI_DELAY_CONTROL_DISABLE 	(1 << 5)
++#define ADI_CMOS_OR_LVDS_N		(1 << 7)
++#define ADI_PPS_RECEIVER_ENABLE		(1 << 8)
++#define ADI_SCALECORRECTION_ONLY	(1 << 9)
++#define ADI_EXT_SYNC			(1 << 12)
++
++#define ADI_REG_RSTN			0x0040
++#define ADI_RSTN				(1 << 0)
++#define ADI_MMCM_RSTN 			(1 << 1)
++
++#define ADI_REG_CNTRL			0x0044
++#define ADI_NUM_LANES(x)                (((x) & 0x1F) << 8)
++#define ADI_SYNC			(1 << 3)
++#define ADI_R1_MODE			(1 << 2)
++#define ADI_DDR_EDGESEL			(1 << 1)
++#define ADI_PIN_MODE			(1 << 0)
++
++#define ADI_REG_CNTRL_2			0x0048
++#define ADI_EXT_SYNC_ARM		(1 << 1)
++#define ADI_EXT_SYNC_DISARM		(1 << 2)
++#define ADI_MANUAL_SYNC_REQUEST		(1 << 8)
++
++#define ADI_REG_CNTRL_3			0x004c
++#define ADI_CRC_EN			(1 << 8)
++
++#define ADI_REG_CLK_FREQ			0x0054
++#define ADI_CLK_FREQ(x)			(((x) & 0xFFFFFFFF) << 0)
++#define ADI_TO_CLK_FREQ(x)		(((x) >> 0) & 0xFFFFFFFF)
++
++#define ADI_REG_CLK_RATIO		0x0058
++#define ADI_CLK_RATIO(x)			(((x) & 0xFFFFFFFF) << 0)
++#define ADI_TO_CLK_RATIO(x)		(((x) >> 0) & 0xFFFFFFFF)
++
++#define ADI_REG_STATUS			0x005C
++#define ADI_MUX_PN_ERR			(1 << 3)
++#define ADI_MUX_PN_OOS			(1 << 2)
++#define ADI_MUX_OVER_RANGE		(1 << 1)
++#define ADI_STATUS			(1 << 0)
++
++#define ADI_REG_DELAY_CNTRL		0x0060	/* <= v8.0 */
++#define ADI_DELAY_SEL			(1 << 17)
++#define ADI_DELAY_RWN			(1 << 16)
++#define ADI_DELAY_ADDRESS(x)		(((x) & 0xFF) << 8)
++#define ADI_TO_DELAY_ADDRESS(x)		(((x) >> 8) & 0xFF)
++#define ADI_DELAY_WDATA(x)		(((x) & 0x1F) << 0)
++#define ADI_TO_DELAY_WDATA(x)		(((x) >> 0) & 0x1F)
++
++#define ADI_REG_DELAY_STATUS		0x0064 /* <= v8.0 */
++#define ADI_DELAY_LOCKED			(1 << 9)
++#define ADI_DELAY_STATUS			(1 << 8)
++#define ADI_DELAY_RDATA(x)		(((x) & 0x1F) << 0)
++#define ADI_TO_DELAY_RDATA(x)		(((x) >> 0) & 0x1F)
++
++#define ADI_REG_SYNC_STATUS		0x0068
++#define ADI_ADC_SYNC_STATUS		(1 << 0)
++
++#define ADI_REG_DRP_CNTRL		0x0070
++#define ADI_DRP_SEL			(1 << 29)
++#define ADI_DRP_RWN			(1 << 28)
++#define ADI_DRP_ADDRESS(x)		(((x) & 0xFFF) << 16)
++#define ADI_TO_DRP_ADDRESS(x)		(((x) >> 16) & 0xFFF)
++#define ADI_DRP_WDATA(x)			(((x) & 0xFFFF) << 0)
++#define ADI_TO_DRP_WDATA(x)		(((x) >> 0) & 0xFFFF)
++
++#define ADI_REG_DRP_STATUS		0x0074
++#define ADI_DRP_STATUS			(1 << 16)
++#define ADI_DRP_RDATA(x)			(((x) & 0xFFFF) << 0)
++#define ADI_TO_DRP_RDATA(x)		(((x) >> 0) & 0xFFFF)
++
++#define ADI_REG_DMA_STATUS		0x0088
++#define ADI_DMA_OVF			(1 << 2)
++#define ADI_DMA_UNF			(1 << 1)
++#define ADI_DMA_STATUS			(1 << 0)
++
++#define ADI_REG_DMA_BUSWIDTH		0x008C
++#define ADI_DMA_BUSWIDTH(x)		(((x) & 0xFFFFFFFF) << 0)
++#define ADI_TO_DMA_BUSWIDTH(x)		(((x) >> 0) & 0xFFFFFFFF)
++
++#define ADI_REG_USR_CNTRL_1		0x00A0
++#define ADI_USR_CHANMAX(x)		(((x) & 0xFF) << 0)
++#define ADI_TO_USR_CHANMAX(x)		(((x) >> 0) & 0xFF)
++
++#define ADI_REG_GP_CONTROL		0x00BC
++
++#define ADI_REG_CLOCKS_PER_PPS		0x00C0
++#define ADI_REG_CLOCKS_PER_PPS_STATUS	0x00C4
++#define ADI_CLOCKS_PER_PPS_STAT_INVAL	(1 << 0)
++
++/* ADC CHANNEL */
++
++#define ADI_REG_CHAN_CNTRL(c)		(0x0400 + (c) * 0x40)
++#define ADI_PN_SEL			(1 << 10) /* !v8.0 */
++#define ADI_IQCOR_ENB			(1 << 9)
++#define ADI_DCFILT_ENB			(1 << 8)
++#define ADI_FORMAT_SIGNEXT		(1 << 6)
++#define ADI_FORMAT_TYPE			(1 << 5)
++#define ADI_FORMAT_ENABLE		(1 << 4)
++#define ADI_PN23_TYPE			(1 << 1) /* !v8.0 */
++#ifndef ADI_ENABLE
++#define ADI_ENABLE			(1 << 0)
++#endif
++
++#define ADI_REG_CHAN_STATUS(c)		(0x0404 + (c) * 0x40)
++#define ADI_PN_ERR			(1 << 2)
++#define ADI_PN_OOS			(1 << 1)
++#define ADI_OVER_RANGE			(1 << 0)
++
++#define ADI_REG_CHAN_CNTRL_1(c)		(0x0410 + (c) * 0x40)
++#define ADI_DCFILT_OFFSET(x)		(((x) & 0xFFFF) << 16)
++#define ADI_TO_DCFILT_OFFSET(x)		(((x) >> 16) & 0xFFFF)
++#define ADI_DCFILT_COEFF(x)		(((x) & 0xFFFF) << 0)
++#define ADI_TO_DCFILT_COEFF(x)		(((x) >> 0) & 0xFFFF)
++
++#define ADI_REG_CHAN_CNTRL_2(c)		(0x0414 + (c) * 0x40)
++#define ADI_IQCOR_COEFF_1(x)		(((x) & 0xFFFF) << 16)
++#define ADI_TO_IQCOR_COEFF_1(x)		(((x) >> 16) & 0xFFFF)
++#define ADI_IQCOR_COEFF_2(x)		(((x) & 0xFFFF) << 0)
++#define ADI_TO_IQCOR_COEFF_2(x)		(((x) >> 0) & 0xFFFF)
++
++#define ADI_REG_CHAN_CNTRL_3(c)		(0x0418 + (c) * 0x40) /* v8.0 */
++#define ADI_ADC_PN_SEL(x)		(((x) & 0xF) << 16)
++#define ADI_TO_ADC_PN_SEL(x)		(((x) >> 16) & 0xF)
++#define ADI_ADC_DATA_SEL(x)		(((x) & 0xF) << 0)
++#define ADI_TO_ADC_DATA_SEL(x)		(((x) >> 0) & 0xF)
++
++enum adc_pn_sel {
++	ADC_PN9 = 0,
++	ADC_PN23A = 1,
++	ADC_PN7 = 4,
++	ADC_PN15 = 5,
++	ADC_PN23 = 6,
++	ADC_PN31 = 7,
++	ADC_PN_CUSTOM = 9,
++	ADC_PN_RAMP_NIBBLE = 10,
++	ADC_PN_RAMP_16 = 11,
++	ADC_PN_OFF = 12,
++};
++
++enum adc_data_sel {
++	ADC_DATA_SEL_NORM,
++	ADC_DATA_SEL_LB, /* DAC loopback */
++	ADC_DATA_SEL_RAMP, /* TBD */
++};
++
++#define ADI_REG_CHAN_USR_CNTRL_1(c)		(0x0420 + (c) * 0x40)
++#define ADI_USR_DATATYPE_BE			(1 << 25)
++#define ADI_USR_DATATYPE_SIGNED			(1 << 24)
++#define ADI_USR_DATATYPE_SHIFT(x)		(((x) & 0xFF) << 16)
++#define ADI_TO_USR_DATATYPE_SHIFT(x)		(((x) >> 16) & 0xFF)
++#define ADI_USR_DATATYPE_TOTAL_BITS(x)		(((x) & 0xFF) << 8)
++#define ADI_TO_USR_DATATYPE_TOTAL_BITS(x)	(((x) >> 8) & 0xFF)
++#define ADI_USR_DATATYPE_BITS(x)			(((x) & 0xFF) << 0)
++#define ADI_TO_USR_DATATYPE_BITS(x)		(((x) >> 0) & 0xFF)
++
++#define ADI_REG_CHAN_USR_CNTRL_2(c)		(0x0424 + (c) * 0x40)
++#define ADI_USR_DECIMATION_M(x)			(((x) & 0xFFFF) << 16)
++#define ADI_TO_USR_DECIMATION_M(x)		(((x) >> 16) & 0xFFFF)
++#define ADI_USR_DECIMATION_N(x)			(((x) & 0xFFFF) << 0)
++#define ADI_TO_USR_DECIMATION_N(x)		(((x) >> 0) & 0xFFFF)
++
++/* PCORE Version > 8.00 */
++#define ADI_REG_DELAY(l)				(0x0800 + (l) * 0x4)
++
++/* debugfs direct register access */
++#define DEBUGFS_DRA_PCORE_REG_MAGIC	0x80000000
++
++#define AXIADC_MAX_CHANNEL		128
++
++#include <linux/mutex.h>
++#include <linux/spi/spi.h>
++#include <linux/clk/clkscale.h>
++
++struct axiadc_state;
++
++struct axiadc_chip_info {
++	unsigned int			id;
++	char				*name;
++	unsigned			num_channels;
++	unsigned 		num_shadow_slave_channels;
++	const unsigned long 	*scan_masks;
++	const int			(*scale_table)[2];
++	int				num_scales;
++	int				max_testmode;
++	unsigned long			max_rate;
++	struct iio_chan_spec		channel[AXIADC_MAX_CHANNEL];
++};
++
++struct axiadc_converter {
++	struct spi_device 	*spi;
++	struct clk 		*clk;
++	struct clock_scale		adc_clkscale;
++	struct clk		*lane_clk;
++	struct clk		*sysref_clk;
++	struct clk		*out_clk;
++	void 			*phy;
++	struct gpio_desc		*pwrdown_gpio;
++	struct gpio_desc		*reset_gpio;
++	unsigned			id;
++	unsigned			adc_output_mode;
++	unsigned 		testmode[AXIADC_MAX_CHANNEL];
++	unsigned			scratch_reg[AXIADC_MAX_CHANNEL];
++	unsigned long 		adc_clk;
++	const struct axiadc_chip_info	*chip_info;
++
++	struct delayed_work	watchdog_work;
++	bool			sample_rate_read_only;
++	bool			running;
++
++	int (*reg_access)(struct iio_dev *indio_dev, unsigned int reg,
++		unsigned int writeval, unsigned int *readval);
++
++	struct iio_chan_spec const	*channels;
++	int				num_channels;
++	const struct attribute_group	*attrs;
++	struct iio_dev 	*indio_dev;
++	/*
++	 * shared lock between the converter and axi_adc to sync
++	 * accesses/configurations to/with the IP core. The axi_adc driver is
++	 * responsible to initialize this lock.
++	 */
++	struct mutex lock;
++	int (*read_raw)(struct iio_dev *indio_dev,
++			struct iio_chan_spec const *chan,
++			int *val,
++			int *val2,
++			long mask);
++
++	int (*write_raw)(struct iio_dev *indio_dev,
++			 struct iio_chan_spec const *chan,
++			 int val,
++			 int val2,
++			 long mask);
++
++	int (*read_event_value)(struct iio_dev *indio_dev,
++			struct iio_chan_spec const *chan,
++			enum iio_event_type type,
++			enum iio_event_direction dir,
++			enum iio_event_info info,
++			int *val,
++			int *val2);
++
++	int (*write_event_value)(struct iio_dev *indio_dev,
++			struct iio_chan_spec const *chan,
++			enum iio_event_type type,
++			enum iio_event_direction dir,
++			enum iio_event_info info,
++			int val,
++			int val2);
++
++	int (*read_event_config)(struct iio_dev *indio_dev,
++			const struct iio_chan_spec *chan,
++			enum iio_event_type type,
++			enum iio_event_direction dir);
++
++	int (*write_event_config)(struct iio_dev *indio_dev,
++			const struct iio_chan_spec *chan,
++			enum iio_event_type type,
++			enum iio_event_direction dir,
++			int state);
++
++	int (*read_label)(struct iio_dev *indio_dev,
++			const struct iio_chan_spec *chan, char *label);
++
++	int (*post_setup)(struct iio_dev *indio_dev);
++	int (*post_iio_register)(struct iio_dev *indio_dev);
++	int (*set_pnsel)(struct iio_dev *indio_dev, unsigned chan,
++			enum adc_pn_sel sel);
++};
++
++
++
++struct axiadc_converter *to_converter(struct device *dev);
++
++/*
++ * IO accessors
++ */
++
++void axiadc_write(struct axiadc_state *st, unsigned int reg, unsigned int val);
++unsigned int axiadc_read(struct axiadc_state *st, unsigned int reg);
++void axiadc_slave_write(struct axiadc_state *st, unsigned int reg,
++			unsigned int val);
++unsigned int axiadc_slave_read(struct axiadc_state *st, unsigned int reg);
++
++void axiadc_idelay_set(struct axiadc_state *st, unsigned int lane,
++		       unsigned int val);
++
++int axiadc_set_pnsel(struct axiadc_state *st, int channel, enum adc_pn_sel sel);
++enum adc_pn_sel axiadc_get_pnsel(struct axiadc_state *st,
++			       int channel, const char **name);
++
++#endif /* ADI_AXI_ADC_H_ */
+diff --git a/drivers/iio/adc/cf_axi_adc_core.c b/drivers/iio/adc/cf_axi_adc_core.c
+new file mode 100644
+index 0000000..887a4c4
+--- /dev/null
++++ b/drivers/iio/adc/cf_axi_adc_core.c
+@@ -0,0 +1,1253 @@
++/*
++ * AXI_ADC ADI ADC Interface Module
++ *
++ * Copyright 2012 Analog Devices Inc.
++ *
++ * Licensed under the GPL-2.
++ *
++ * http://wiki.analog.com/resources/fpga/xilinx/fmc/ad9467
++ */
++
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/errno.h>
++#include <linux/slab.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/wait.h>
++#include <linux/spi/spi.h>
++#include <linux/dma-mapping.h>
++#include <linux/dmaengine.h>
++#include <linux/delay.h>
++#include <linux/debugfs.h>
++#include <linux/uaccess.h>
++#include <linux/clk.h>
++#include <linux/platform_device.h>
++#include <linux/of.h>
++
++#include <linux/iio/iio.h>
++#include <linux/iio/sysfs.h>
++#include <linux/iio/buffer.h>
++#include <linux/iio/buffer_impl.h>
++#include <linux/iio/buffer-dma.h>
++#include <linux/iio/buffer-dmaengine.h>
++
++#include <linux/jesd204/jesd204.h>
++#include <linux/jesd204/adi-common.h>
++
++#include "cf_axi_adc.h"
++
++const unsigned int decimation_factors_available[] = {1, 8};
++
++struct axiadc_core_info {
++	unsigned int version;
++};
++
++struct axiadc_state {
++	struct device 			*dev_spi;
++	struct iio_info			iio_info;
++	struct clk 			*clk;
++	struct gpio_desc		*gpio_decimation;
++	struct jesd204_dev 		*jdev;
++	size_t				regs_size;
++	void __iomem			*regs;
++	void __iomem			*slave_regs;
++	unsigned int			max_usr_channel;
++	unsigned int			id;
++	unsigned int			pcore_version;
++	unsigned int			decimation_factor;
++	unsigned long long		adc_clk;
++	unsigned int			have_slave_channels;
++	bool				additional_channel;
++	bool				dp_disable;
++	bool				ext_sync_avail;
++
++	struct iio_chan_spec		channels[AXIADC_MAX_CHANNEL];
++};
++
++struct axiadc_converter *to_converter(struct device *dev)
++{
++	struct axiadc_converter *conv = spi_get_drvdata(to_spi_device(dev));
++
++	if (conv)
++		return conv;
++
++	return ERR_PTR(-ENODEV);
++}
++EXPORT_SYMBOL_GPL(to_converter);
++
++void axiadc_write(struct axiadc_state *st, unsigned reg, unsigned val)
++{
++	iowrite32(val, st->regs + reg);
++}
++EXPORT_SYMBOL_GPL(axiadc_write);
++
++unsigned int axiadc_read(struct axiadc_state *st, unsigned reg)
++{
++	return ioread32(st->regs + reg);
++}
++EXPORT_SYMBOL_GPL(axiadc_read);
++
++void axiadc_slave_write(struct axiadc_state *st, unsigned reg, unsigned val)
++{
++	iowrite32(val, st->slave_regs + reg);
++}
++EXPORT_SYMBOL_GPL(axiadc_slave_write);
++
++unsigned int axiadc_slave_read(struct axiadc_state *st, unsigned reg)
++{
++	return ioread32(st->slave_regs + reg);
++}
++EXPORT_SYMBOL_GPL(axiadc_slave_read);
++
++void axiadc_idelay_set(struct axiadc_state *st, unsigned lane, unsigned val)
++{
++	axiadc_write(st, ADI_REG_DELAY(lane), val);
++}
++EXPORT_SYMBOL_GPL(axiadc_idelay_set);
++
++static int axiadc_hw_submit_block(struct iio_dma_buffer_queue *queue,
++	struct iio_dma_buffer_block *block)
++{
++	return -ENODEV;
++}
++
++static void axiadc_dma_abort(struct iio_dma_buffer_queue *queue) { }
++
++static const struct iio_dma_buffer_ops axiadc_dma_buffer_ops = {
++	.submit = axiadc_hw_submit_block,
++	.abort = axiadc_dma_abort,
++};
++
++static int axiadc_configure_ring_stream(struct iio_dev *indio_dev,
++	const char *dma_name)
++{
++	return 0;
++}
++
++static int axiadc_chan_to_regoffset(struct iio_chan_spec const *chan)
++{
++	if (chan->modified)
++		return chan->scan_index;
++
++	return chan->channel;
++}
++
++int axiadc_set_pnsel(struct axiadc_state *st, int channel, enum adc_pn_sel sel)
++{
++	unsigned reg;
++
++	reg = axiadc_read(st, ADI_REG_CHAN_CNTRL_3(channel));
++	reg &= ~ADI_ADC_PN_SEL(~0);
++	reg |= ADI_ADC_PN_SEL(sel);
++	axiadc_write(st, ADI_REG_CHAN_CNTRL_3(channel), reg);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(axiadc_set_pnsel);
++
++enum adc_pn_sel axiadc_get_pnsel(struct axiadc_state *st,
++			       int channel, const char **name)
++{
++	unsigned val;
++	const char *ident[] = {"PN9", "PN23A", "UNDEF", "UNDEF",
++			"PN7", "PN15", "PN23", "PN31", "UNDEF", "PN_CUSTOM"};
++
++	val = ADI_TO_ADC_PN_SEL(axiadc_read(st, ADI_REG_CHAN_CNTRL_3(channel)));
++
++	if (name) {
++		if (val >= ARRAY_SIZE(ident))
++			*name = "UNDEF";
++		else
++			*name = ident[val];
++	}
++
++	return val;
++}
++
++static unsigned int axiadc_num_phys_channels(struct axiadc_state *st)
++{
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++	return conv->chip_info->num_channels - st->have_slave_channels;
++}
++
++static ssize_t axiadc_debugfs_pncheck_read(struct file *file, char __user *userbuf,
++			      size_t count, loff_t *ppos)
++{
++	struct iio_dev *indio_dev = file->private_data;
++	struct axiadc_state *st = iio_priv(indio_dev);
++	char buf[1000];
++	const char *pn_name;
++	ssize_t len = 0;
++	unsigned stat, i;
++
++	for (i = 0; i < axiadc_num_phys_channels(st); i++) {
++		stat = axiadc_read(st, ADI_REG_CHAN_STATUS(i));
++		axiadc_get_pnsel(st, i, &pn_name);
++
++		len += sprintf(buf + len, "CH%d : %s : %s %s\n", i, pn_name,
++			(stat & ADI_PN_OOS) ? "Out of Sync :" : "In Sync :",
++			(stat & (ADI_PN_ERR | ADI_PN_OOS)) ? "PN Error" : "OK");
++		axiadc_write(st, ADI_REG_CHAN_STATUS(i), ~0);
++		if (len > 955)
++			return -ENOMEM;
++	}
++
++	return simple_read_from_buffer(userbuf, count, ppos, buf, len);
++}
++
++static ssize_t axiadc_debugfs_pncheck_write(struct file *file,
++		     const char __user *userbuf, size_t count, loff_t *ppos)
++{
++	struct iio_dev *indio_dev = file->private_data;
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++	enum adc_pn_sel mode;
++	unsigned int i;
++	char buf[80], *p = buf;
++
++	count = min_t(size_t, count, (sizeof(buf)-1));
++	if (copy_from_user(p, userbuf, count))
++		return -EFAULT;
++
++	p[count] = 0;
++
++	if (sysfs_streq(p, "PN9"))
++		mode = ADC_PN9;
++	else if (sysfs_streq(p, "PN23"))
++		mode = ADC_PN23A;
++	else
++		mode = ADC_PN_OFF;
++
++	mutex_lock(&conv->lock);
++
++	for (i = 0; i < axiadc_num_phys_channels(st); i++) {
++		if (conv->set_pnsel)
++			conv->set_pnsel(indio_dev, i, mode);
++
++		if (mode != ADC_PN_OFF)
++			axiadc_set_pnsel(st, i, mode);
++	}
++
++	mdelay(1);
++
++	for (i = 0; i < axiadc_num_phys_channels(st); i++)
++		axiadc_write(st, ADI_REG_CHAN_STATUS(i), ~0);
++
++	mutex_unlock(&conv->lock);
++
++	return count;
++}
++
++static const struct file_operations axiadc_debugfs_pncheck_fops = {
++	.open = simple_open,
++	.read = axiadc_debugfs_pncheck_read,
++	.write = axiadc_debugfs_pncheck_write,
++};
++
++static int axiadc_reg_access(struct iio_dev *indio_dev,
++			      unsigned reg, unsigned writeval,
++			      unsigned *readval)
++{
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++	int ret;
++
++	/* Check that the register is in range and aligned */
++	if ((reg & DEBUGFS_DRA_PCORE_REG_MAGIC) &&
++	    ((reg & 0xffff) >= st->regs_size || (reg & 0x3)))
++		return -EINVAL;
++
++	mutex_lock(&conv->lock);
++
++	if (!(reg & DEBUGFS_DRA_PCORE_REG_MAGIC)) {
++		struct axiadc_converter *conv = to_converter(st->dev_spi);
++		if (IS_ERR(conv))
++			ret = PTR_ERR(conv);
++		else if (!conv->reg_access)
++			ret = -ENODEV;
++		else
++			ret = conv->reg_access(indio_dev, reg, writeval, readval);
++	} else {
++		if (readval == NULL)
++			axiadc_write(st, reg & 0xFFFF, writeval);
++		else
++			*readval = axiadc_read(st, reg & 0xFFFF);
++		ret = 0;
++	}
++	mutex_unlock(&conv->lock);
++
++	return 0;
++}
++
++static int axiadc_decimation_set(struct axiadc_state *st,
++				 unsigned int decimation_factor)
++{
++	int ret = 0;
++	u32 reg;
++
++	switch (decimation_factor) {
++		case 1:
++		case 8:
++			reg = axiadc_read(st, ADI_REG_GP_CONTROL);
++
++			if (decimation_factor == 8)
++				reg |= BIT(0);
++			else
++				reg &= ~BIT(0);
++
++			if (st->gpio_decimation)
++				gpiod_set_value(st->gpio_decimation,
++						reg & BIT(0));
++			else
++				axiadc_write(st, ADI_REG_GP_CONTROL, reg);
++			st->decimation_factor = decimation_factor;
++			break;
++		default:
++			ret = -EINVAL;
++	}
++
++	return ret;
++}
++
++static int axiadc_get_parent_sampling_frequency(struct axiadc_state *st, unsigned long *freq)
++{
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++	int ret = 0;
++
++	if (conv->clk)
++		*freq = clk_get_rate(conv->clk);
++	else
++		ret = -ENODEV;
++
++	return ret;
++}
++
++static ssize_t axiadc_decimation_store(struct axiadc_state *st,
++				       unsigned long frequency)
++{
++	unsigned long parent, val;
++	int i, ret;
++
++	if (!frequency)
++		return -EINVAL;
++
++	ret = axiadc_get_parent_sampling_frequency(st, &parent);
++	if (ret < 0)
++		return ret;
++
++	val = DIV_ROUND_CLOSEST(parent, frequency);
++
++	for (i = 0; i < ARRAY_SIZE(decimation_factors_available); i++) {
++		if (val == decimation_factors_available[i])
++			return axiadc_decimation_set(st, val);
++	}
++
++	return -EINVAL;
++}
++
++static ssize_t axiadc_sampling_frequency_available(struct device *dev,
++						   struct device_attribute *attr,
++						   char *buf)
++{
++	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++	unsigned long freq;
++	int i, ret;
++
++	if (!st->decimation_factor)
++		return -ENODEV;
++
++	mutex_lock(&conv->lock);
++	ret = axiadc_get_parent_sampling_frequency(st, &freq);
++	if (ret < 0) {
++		mutex_unlock(&conv->lock);
++		return ret;
++	}
++
++	for (ret = 0, i = 0; i < ARRAY_SIZE(decimation_factors_available); i++)
++		ret += snprintf(buf + ret, PAGE_SIZE - ret, "%ld ",
++				freq / decimation_factors_available[i]);
++
++	ret += snprintf(&buf[ret], PAGE_SIZE - ret, "\n");
++
++	mutex_unlock(&conv->lock);
++
++	return ret;
++}
++
++static const char * const axiadc_sync_ctrls[] = {
++	"arm", "disarm", "trigger_manual",
++};
++
++static ssize_t axiadc_sync_start_store(struct device *dev,
++				 struct device_attribute *attr,
++				 const char *buf, size_t len)
++{
++	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++	int ret;
++
++	ret = sysfs_match_string(axiadc_sync_ctrls, buf);
++	if (ret < 0)
++		return ret;
++
++	mutex_lock(&conv->lock);
++	if (st->ext_sync_avail) {
++		switch (ret) {
++		case 0:
++			axiadc_write(st, ADI_REG_CNTRL_2, ADI_EXT_SYNC_ARM);
++			break;
++		case 1:
++			axiadc_write(st, ADI_REG_CNTRL_2, ADI_EXT_SYNC_DISARM);
++			break;
++		case 2:
++			axiadc_write(st, ADI_REG_CNTRL_2, ADI_MANUAL_SYNC_REQUEST);
++			break;
++		default:
++			ret = -EINVAL;
++		}
++	} else if (ret == 0) {
++		u32 reg;
++
++		reg = axiadc_read(st, ADI_REG_CNTRL);
++		axiadc_write(st, ADI_REG_CNTRL, reg | ADI_SYNC);
++	}
++	mutex_unlock(&conv->lock);
++
++	return ret < 0 ? ret : len;
++}
++
++static ssize_t axiadc_sync_start_show(struct device *dev,
++				      struct device_attribute *attr,
++				      char *buf)
++{
++	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
++	struct iio_dev_attr *this_attr = to_iio_dev_attr(attr);
++	struct axiadc_state *st = iio_priv(indio_dev);
++	u32 reg;
++
++	switch ((u32)this_attr->address) {
++	case 0:
++		reg = axiadc_read(st, ADI_REG_SYNC_STATUS);
++
++		return sprintf(buf, "%s\n", reg & ADI_ADC_SYNC_STATUS ?
++			axiadc_sync_ctrls[0] : axiadc_sync_ctrls[1]);
++	case 1:
++		if (st->ext_sync_avail)
++			return sprintf(buf, "arm disarm trigger_manual\n");
++		else
++			return sprintf(buf, "arm\n");
++	default:
++		return -EINVAL;
++	}
++
++	return -EINVAL;
++}
++
++static IIO_DEVICE_ATTR(sync_start_enable, 0644,
++		       axiadc_sync_start_show,
++		       axiadc_sync_start_store,
++		       0);
++
++static IIO_DEVICE_ATTR(sync_start_enable_available, 0444,
++		       axiadc_sync_start_show,
++		       NULL,
++		       1);
++
++static IIO_DEVICE_ATTR(in_voltage_sampling_frequency_available, S_IRUGO,
++		       axiadc_sampling_frequency_available,
++		       NULL,
++		       0);
++
++static struct attribute *axiadc_attributes[] = {
++	&iio_dev_attr_sync_start_enable.dev_attr.attr,
++	&iio_dev_attr_sync_start_enable_available.dev_attr.attr,
++	&iio_dev_attr_in_voltage_sampling_frequency_available.dev_attr.attr,
++	NULL,
++};
++
++static const struct attribute_group axiadc_dec_attribute_group = {
++	.attrs = axiadc_attributes,
++};
++
++static int axiadc_read_raw(struct iio_dev *indio_dev,
++			   struct iio_chan_spec const *chan,
++			   int *val,
++			   int *val2,
++			   long m)
++{
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++	int ret, sign;
++	unsigned tmp, phase = 0, channel;
++	unsigned long long llval;
++
++	channel = axiadc_chan_to_regoffset(chan);
++
++	switch (m) {
++	case IIO_CHAN_INFO_CALIBPHASE:
++		phase = 1;
++		fallthrough;
++	case IIO_CHAN_INFO_CALIBSCALE:
++		tmp = axiadc_read(st, ADI_REG_CHAN_CNTRL_2(channel));
++		/*  format is 1.1.14 (sign, integer and fractional bits) */
++
++		if (!((phase + channel) % 2)) {
++			tmp = ADI_TO_IQCOR_COEFF_1(tmp);
++		} else {
++			tmp = ADI_TO_IQCOR_COEFF_2(tmp);
++		}
++
++		if (tmp & 0x8000)
++			sign = -1;
++		else
++			sign = 1;
++
++		if (tmp & 0x4000)
++			*val = 1 * sign;
++		else
++			*val = 0;
++
++		tmp &= ~0xC000;
++
++		llval = tmp * 1000000ULL + (0x4000 / 2);
++		do_div(llval, 0x4000);
++		if (*val == 0)
++			*val2 = llval * sign;
++		else
++			*val2 = llval;
++
++		return IIO_VAL_INT_PLUS_MICRO;
++
++	case IIO_CHAN_INFO_CALIBBIAS:
++		tmp = axiadc_read(st, ADI_REG_CHAN_CNTRL_1(channel));
++		*val = (short)ADI_TO_DCFILT_OFFSET(tmp);
++
++		return IIO_VAL_INT;
++	case IIO_CHAN_INFO_HIGH_PASS_FILTER_3DB_FREQUENCY:
++		/*
++		 * approx: F_cut = C * Fsample / (2 * pi)
++		 */
++
++		tmp = axiadc_read(st, ADI_REG_CHAN_CNTRL(channel));
++		if (!(tmp & ADI_DCFILT_ENB)) {
++			*val = 0;
++			return IIO_VAL_INT;
++		}
++
++		tmp = axiadc_read(st, ADI_REG_CHAN_CNTRL_1(channel));
++		llval = ADI_TO_DCFILT_COEFF(tmp) * (unsigned long long)conv->adc_clk;
++		do_div(llval, 102944); /* 2 * pi * 0x4000 */
++		*val = llval;
++
++		return IIO_VAL_INT;
++	case IIO_CHAN_INFO_SAMP_FREQ:
++		*val2 = 0;
++		ret = conv->read_raw(indio_dev, chan, val, val2, m);
++		llval = (u64)*val2 << 32 | *val;
++		if (ret < 0 || !llval) {
++			tmp = ADI_TO_CLK_FREQ(axiadc_read(st, ADI_REG_CLK_FREQ));
++			llval = tmp * 100000000ULL /* FIXME */ * ADI_TO_CLK_RATIO(axiadc_read(st, ADI_REG_CLK_RATIO));
++			llval = llval >> 16;
++		}
++
++		if (chan->extend_name && !strcmp(chan->extend_name, "user_logic")) {
++			tmp = axiadc_read(st,
++				ADI_REG_CHAN_USR_CNTRL_2(channel));
++
++			llval = ADI_TO_USR_DECIMATION_M(tmp) * conv->adc_clk;
++			do_div(llval, ADI_TO_USR_DECIMATION_N(tmp));
++		}
++
++		if (st->decimation_factor)
++			do_div(llval, st->decimation_factor);
++
++		*val = lower_32_bits(llval);
++		*val2 = upper_32_bits(llval);
++
++		return IIO_VAL_INT_64;
++	default:
++		return conv->read_raw(indio_dev, chan, val, val2, m);
++
++	}
++
++	return -EINVAL;
++}
++
++static int axiadc_write_raw(struct iio_dev *indio_dev,
++			       struct iio_chan_spec const *chan,
++			       int val,
++			       int val2,
++			       long mask)
++{
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++	unsigned fract, tmp, phase = 0, channel;
++	unsigned long long llval;
++
++	channel = axiadc_chan_to_regoffset(chan);
++
++	switch (mask) {
++	case IIO_CHAN_INFO_CALIBPHASE:
++		phase = 1;
++		fallthrough;
++	case IIO_CHAN_INFO_CALIBSCALE:
++		/*  format is 1.1.14 (sign, integer and fractional bits) */
++		switch (val) {
++		case 1:
++			fract = 0x4000;
++			break;
++		case -1:
++			fract = 0xC000;
++			break;
++		case 0:
++			fract = 0;
++			if (val2 < 0) {
++				fract = 0x8000;
++				val2 *= -1;
++			}
++			break;
++		default:
++			return -EINVAL;
++		}
++
++		llval = (unsigned long long)val2 * 0x4000UL + (1000000UL / 2);
++		do_div(llval, 1000000UL);
++		fract |= llval;
++
++		tmp = axiadc_read(st, ADI_REG_CHAN_CNTRL_2(channel));
++
++		if (!((channel + phase) % 2)) {
++			tmp &= ~ADI_IQCOR_COEFF_1(~0);
++			tmp |= ADI_IQCOR_COEFF_1(fract);
++		} else {
++			tmp &= ~ADI_IQCOR_COEFF_2(~0);
++			tmp |= ADI_IQCOR_COEFF_2(fract);
++		}
++
++		axiadc_write(st, ADI_REG_CHAN_CNTRL_2(channel), tmp);
++
++		return 0;
++
++	case IIO_CHAN_INFO_HIGH_PASS_FILTER_3DB_FREQUENCY:
++		/* C = 1 – e^(-2 * pi * F_cut / Fsample)
++		 * approx: C = 2 * pi * F_cut / Fsample
++		 */
++
++		tmp = axiadc_read(st, ADI_REG_CHAN_CNTRL(channel));
++
++		if (val == 0 && val2 == 0) {
++			tmp &= ~ADI_DCFILT_ENB;
++			axiadc_write(st, ADI_REG_CHAN_CNTRL(channel), tmp);
++			return 0;
++		}
++
++		tmp |= ADI_DCFILT_ENB;
++
++		llval = 102944ULL * val; /* 2 * pi * 0x4000 * val */
++		do_div(llval, conv->adc_clk);
++
++		axiadc_write(st, ADI_REG_CHAN_CNTRL_1(channel),
++			     ADI_DCFILT_COEFF(clamp_t(unsigned short, llval, 1, 0x4000)));
++		axiadc_write(st, ADI_REG_CHAN_CNTRL(channel), tmp);
++
++		return 0;
++
++	case IIO_CHAN_INFO_CALIBBIAS:
++		tmp = axiadc_read(st, ADI_REG_CHAN_CNTRL_1(channel));
++		tmp &= ~ADI_DCFILT_OFFSET(~0);
++		tmp |= ADI_DCFILT_OFFSET((short)val);
++
++		axiadc_write(st, ADI_REG_CHAN_CNTRL_1(channel), tmp);
++		return 0;
++
++	case IIO_CHAN_INFO_SAMP_FREQ:
++		if (st->decimation_factor)
++			return axiadc_decimation_store(st, val);
++
++		return conv->write_raw(indio_dev, chan, val, val2, mask);
++
++	default:
++		return conv->write_raw(indio_dev, chan, val, val2, mask);
++	}
++}
++
++
++static int axiadc_read_event_value(struct iio_dev *indio_dev,
++	const struct iio_chan_spec *chan, enum iio_event_type type,
++	enum iio_event_direction dir, enum iio_event_info info, int *val,
++	int *val2)
++{
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++
++	if (conv->read_event_value)
++		return conv->read_event_value(indio_dev, chan,
++				type, dir, info, val, val2);
++	else
++		return -ENOSYS;
++}
++
++static int axiadc_write_event_value(struct iio_dev *indio_dev,
++	const struct iio_chan_spec *chan, enum iio_event_type type,
++	enum iio_event_direction dir, enum iio_event_info info, int val,
++	int val2)
++{
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++
++	if (conv->write_event_value)
++		return conv->write_event_value(indio_dev, chan,
++				type, dir, info, val, val2);
++	else
++		return -ENOSYS;
++}
++
++static int axiadc_read_event_config(struct iio_dev *indio_dev,
++				    const struct iio_chan_spec *chan,
++				    enum iio_event_type type,
++				    enum iio_event_direction dir)
++{
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++
++	if (conv->read_event_config)
++		return conv->read_event_config(indio_dev, chan, type, dir);
++	else
++		return -ENOSYS;
++}
++
++static int axiadc_write_event_config(struct iio_dev *indio_dev,
++				     const struct iio_chan_spec *chan,
++				     enum iio_event_type type,
++				     enum iio_event_direction dir,
++				     int state)
++{
++	struct axiadc_state *st = iio_priv(indio_dev);
++	struct axiadc_converter *conv = to_converter(st->dev_spi);
++
++	if (conv->write_event_config)
++		return conv->write_event_config(indio_dev,
++				chan, type, dir, state);
++	else
++		return -ENOSYS;
++}
++
++static int axiadc_update_scan_mode(struct iio_dev *indio_dev,
++	const unsigned long *scan_mask)
++{
++	struct axiadc_state *st = iio_priv(indio_dev);
++	unsigned i, ctrl;
++
++	for (i = 0; i < indio_dev->masklength; i++) {
++		if (i > (st->have_slave_channels - 1))
++			ctrl = axiadc_slave_read(st,
++				ADI_REG_CHAN_CNTRL(i - st->have_slave_channels));
++		else
++			ctrl = axiadc_read(st, ADI_REG_CHAN_CNTRL(i));
++
++		if (test_bit(i, scan_mask))
++			ctrl |= ADI_ENABLE;
++		else
++			ctrl &= ~ADI_ENABLE;
++
++
++		if (i > (st->have_slave_channels - 1))
++			axiadc_slave_write(st,
++				ADI_REG_CHAN_CNTRL(i - st->have_slave_channels),
++				ctrl);
++		else
++			axiadc_write(st, ADI_REG_CHAN_CNTRL(i), ctrl);
++	}
++
++	return 0;
++}
++
++static int axiadc_channel_setup(struct iio_dev *indio_dev,
++				const struct iio_chan_spec *adc_channels,
++				unsigned adc_chan_num)
++{
++	struct axiadc_state *st = iio_priv(indio_dev);
++	unsigned i, cnt, usr_ctrl;
++
++	st->max_usr_channel = ADI_USR_CHANMAX(axiadc_read(st, ADI_REG_USR_CNTRL_1));
++	st->max_usr_channel = 0; /* FIXME */
++
++	for (i = 0, cnt = 0; i < adc_chan_num; i++)
++		st->channels[cnt++] = adc_channels[i];
++
++	if (st->additional_channel && cnt < AXIADC_MAX_CHANNEL) {
++		st->channels[cnt] = adc_channels[0];
++		st->channels[cnt].channel = cnt;
++		st->channels[cnt].scan_index = cnt;
++		cnt++;
++	}
++
++	for (i = 0; i < st->max_usr_channel; i++) {
++		usr_ctrl = axiadc_read(st, ADI_REG_CHAN_USR_CNTRL_1(cnt));
++		st->channels[cnt].type = IIO_VOLTAGE;
++		st->channels[cnt].indexed = 1,
++		st->channels[cnt].channel = cnt;
++		st->channels[cnt].scan_index = cnt;
++		st->channels[cnt].info_mask_separate = BIT(IIO_CHAN_INFO_SAMP_FREQ);
++		st->channels[cnt].extend_name = "user_logic";
++		st->channels[cnt].scan_type.sign = (usr_ctrl & ADI_USR_DATATYPE_SIGNED) ? 's' : 'u';
++		st->channels[cnt].scan_type.realbits = ADI_TO_USR_DATATYPE_BITS(usr_ctrl);
++		st->channels[cnt].scan_type.storagebits = ADI_TO_USR_DATATYPE_TOTAL_BITS(usr_ctrl);
++		st->channels[cnt].scan_type.shift = ADI_TO_USR_DATATYPE_SHIFT(usr_ctrl);
++		st->channels[cnt].scan_type.endianness = (usr_ctrl & ADI_USR_DATATYPE_BE) ? IIO_BE : IIO_LE;
++		cnt++;
++	}
++
++	indio_dev->channels = st->channels;
++	indio_dev->num_channels = cnt;
++
++	return 0;
++}
++
++static const struct iio_info axiadc_info = {
++	.read_raw = &axiadc_read_raw,
++	.write_raw = &axiadc_write_raw,
++	.read_event_value = &axiadc_read_event_value,
++	.write_event_value = &axiadc_write_event_value,
++	.read_event_config = &axiadc_read_event_config,
++	.write_event_config = &axiadc_write_event_config,
++	.debugfs_reg_access = &axiadc_reg_access,
++	.update_scan_mode = &axiadc_update_scan_mode,
++};
++
++struct axiadc_spidev {
++	struct device_node *of_nspi;
++	struct device *dev_spi;
++	struct module *owner;
++};
++
++static int axiadc_attach_spi_client(struct device *dev, void *data)
++{
++	struct axiadc_spidev *axiadc_spidev = data;
++	int ret = 0;
++
++	device_lock(dev);
++	if ((axiadc_spidev->of_nspi == dev->of_node) && dev->driver) {
++		axiadc_spidev->dev_spi = dev;
++		axiadc_spidev->owner = dev->driver->owner;
++		ret = 1;
++	}
++	device_unlock(dev);
++
++	return ret;
++}
++
++static int axiadc_jesd204_link_supported(struct jesd204_dev *jdev,
++		enum jesd204_state_op_reason reason,
++		struct jesd204_link *lnk)
++{
++	struct device *dev = jesd204_dev_to_device(jdev);
++	struct iio_dev *indio_dev = dev_get_drvdata(dev);
++	struct axiadc_state *st = iio_priv(indio_dev);
++	u32 i, d1, d2, num, multi_device_link;
++	bool failed, last;
++
++	if (reason != JESD204_STATE_OP_REASON_INIT)
++		return JESD204_STATE_CHANGE_DONE;
++
++	dev_dbg(dev, "%s:%d link_num %u reason %s\n", __func__, __LINE__,
++		lnk->link_id, jesd204_state_op_reason_str(reason));
++
++	num = ADI_JESD204_TPL_TO_PROFILE_NUM(axiadc_read(st, ADI_JESD204_REG_TPL_STATUS));
++
++	for (i = 0; i < num; i++) {
++		last = (i == (num - 1));
++		failed = false;
++
++		axiadc_write(st, ADI_JESD204_REG_TPL_CNTRL, ADI_JESD204_PROFILE_SEL(i));
++		d1 = axiadc_read(st, ADI_JESD204_REG_TPL_DESCRIPTOR_1);
++		d2 = axiadc_read(st, ADI_JESD204_REG_TPL_DESCRIPTOR_2);
++
++		if ((ADI_JESD204_TPL_TO_L(d1) / lnk->num_lanes) ==
++			(ADI_JESD204_TPL_TO_M(d1) / lnk->num_converters))
++			multi_device_link = ADI_JESD204_TPL_TO_L(d1) / lnk->num_lanes;
++		else
++			multi_device_link = 1;
++
++		if (ADI_JESD204_TPL_TO_L(d1) != lnk->num_lanes * multi_device_link) {
++			if (last)
++				dev_warn(dev,
++					"profile%u:link_num%u param L mismatch %u!=%u*%u\n",
++					i, lnk->link_id, ADI_JESD204_TPL_TO_L(d1), lnk->num_lanes,
++					multi_device_link);
++			failed = true;
++		}
++
++		if (ADI_JESD204_TPL_TO_M(d1) != lnk->num_converters * multi_device_link) {
++			if (last)
++				dev_warn(dev,
++					"profile%u:link_num%u param M mismatch %u!=%u*%u\n",
++					i, lnk->link_id, ADI_JESD204_TPL_TO_M(d1),
++					lnk->num_converters, multi_device_link);
++			failed = true;
++		}
++
++		if (lnk->samples_per_conv_frame && ADI_JESD204_TPL_TO_S(d1) !=
++			lnk->samples_per_conv_frame) {
++			if (last)
++				dev_warn(dev,
++					"profile%u:link_num%u param S mismatch %u!=%u\n",
++					i, lnk->link_id, ADI_JESD204_TPL_TO_S(d1),
++					lnk->samples_per_conv_frame);
++			failed = true;
++		}
++
++		if (ADI_JESD204_TPL_TO_F(d1) != lnk->octets_per_frame) {
++			if (last)
++				dev_warn(dev,
++					"profile%u:link_num%u param F mismatch %u!=%u\n",
++					i, lnk->link_id, ADI_JESD204_TPL_TO_F(d1),
++					lnk->octets_per_frame);
++			failed = true;
++		}
++
++		if (ADI_JESD204_TPL_TO_NP(d2) != lnk->bits_per_sample) {
++			if (last)
++				dev_warn(dev,
++					"profile%u:link_num%u param NP mismatch %u!=%u\n",
++					i, lnk->link_id, ADI_JESD204_TPL_TO_NP(d2),
++					lnk->bits_per_sample);
++			failed = true;
++		}
++
++		if (!failed)
++			return JESD204_STATE_CHANGE_DONE;
++	}
++
++	dev_err(dev, "JESD param mismatch between TPL and Link configuration !\n");
++
++	return JESD204_STATE_CHANGE_DONE;
++}
++
++static const struct jesd204_dev_data jesd204_axiadc_init = {
++	.state_ops = {
++		[JESD204_OP_LINK_SUPPORTED] = {
++			.per_link = axiadc_jesd204_link_supported,
++		},
++	},
++};
++
++static const struct axiadc_core_info axi_adc_10_0_a_info = {
++	.version = ADI_AXI_PCORE_VER(10, 0, 'a'),
++};
++
++static const struct axiadc_core_info axi_adc_10_1_b_info = {
++	.version = ADI_AXI_PCORE_VER(10, 1, 'b'),
++};
++
++/* Match table for of_platform binding */
++static const struct of_device_id axiadc_of_match[] = {
++	{ .compatible =	"xlnx,axi-ad9234-1.00.a", .data = &axi_adc_10_0_a_info },
++	{ .compatible =	"xlnx,axi-ad9250-1.00.a", .data = &axi_adc_10_0_a_info },
++	{ .compatible =	"xlnx,axi-ad9434-1.00.a", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad9643-6.00.a", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad9361-6.00.a", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad9680-1.0", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad9694-1.0", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad9625-1.0", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad6676-1.0", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad9371-rx-1.0", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad9684-1.0", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-adrv9009-rx-1.0", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad9208-1.0", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-ad9081-rx-1.0", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-adc-10.0.a", .data = &axi_adc_10_0_a_info },
++	{ .compatible = "adi,axi-adrv9002-rx-1.0", .data = &axi_adc_10_1_b_info},
++	{ .compatible = "adi,axi-ad9083-rx-1.0", .data = &axi_adc_10_0_a_info },
++	{ /* end of list */ },
++};
++MODULE_DEVICE_TABLE(of, axiadc_of_match);
++
++int axiadc_append_attrs(struct iio_dev *indio_dev,
++	const struct attribute_group *add_group, unsigned int skip_cnt)
++{
++	size_t old_cnt = 0, add_cnt = 0, new_cnt;
++	struct attribute **attrs;
++	struct attribute_group *group;
++	struct iio_info	*iio_info = (struct iio_info *) indio_dev->info;
++
++	if (!add_group)
++		return -EINVAL;
++
++	if (indio_dev->info->attrs) {
++		attrs = indio_dev->info->attrs->attrs;
++		while (*attrs++ != NULL)
++			old_cnt++;
++	} else if (!skip_cnt) {
++		iio_info->attrs = add_group;
++
++		return 0;
++	}
++
++	if (add_group->attrs) {
++		attrs = add_group->attrs;
++		while (*attrs++ != NULL)
++			add_cnt++;
++	}
++
++	if (skip_cnt > add_cnt)
++		return -EINVAL;
++
++	add_cnt -= skip_cnt;
++	new_cnt = old_cnt + add_cnt + 1;
++	attrs = devm_kcalloc(indio_dev->dev.parent, new_cnt,
++		sizeof(*attrs), GFP_KERNEL);
++	if (!attrs)
++		return -ENOMEM;
++
++	group = devm_kzalloc(indio_dev->dev.parent,
++		sizeof(*group), GFP_KERNEL);
++	if (!group)
++		return -ENOMEM;
++
++	if (old_cnt)
++		memcpy(attrs, indio_dev->info->attrs->attrs,
++			old_cnt * sizeof(*attrs));
++	memcpy(attrs + old_cnt, add_group->attrs, add_cnt * sizeof(*attrs));
++	attrs[new_cnt - 1] = NULL;
++	group->attrs = attrs;
++
++	iio_info->attrs = group;
++
++	return 0;
++}
++
++static void axiadc_release_converter(void *conv)
++{
++	struct axiadc_spidev *axiadc_spidev = conv;
++
++	put_device(axiadc_spidev->dev_spi);
++	module_put(axiadc_spidev->owner);
++}
++
++/**
++ * axiadc_of_probe - probe method for the AIM device.
++ * @of_dev:	pointer to OF device structure
++ * @match:	pointer to the structure used for matching a device
++ *
++ * This function probes the AIM device in the device tree.
++ * It initializes the driver data structure and the hardware.
++ * It returns 0, if the driver is bound to the AIM device, or a negative
++ * value if there is an error.
++ */
++static int axiadc_probe(struct platform_device *pdev)
++{
++	const struct axiadc_core_info *info;
++	const struct of_device_id *id;
++	struct iio_dev *indio_dev;
++	struct axiadc_state *st;
++	struct resource *mem;
++	struct axiadc_spidev *axiadc_spidev;
++	struct axiadc_converter *conv;
++	unsigned int config, skip = 1;
++	int ret;
++
++	dev_dbg(&pdev->dev, "Device Tree Probing \'%s\'\n",
++		 pdev->dev.of_node->name);
++
++	id = of_match_node(axiadc_of_match, pdev->dev.of_node);
++	if (!id)
++		return -ENODEV;
++
++	info = id->data;
++
++	axiadc_spidev = devm_kzalloc(&pdev->dev, sizeof(*axiadc_spidev), GFP_KERNEL);
++	if (!axiadc_spidev)
++		return -ENOMEM;
++
++	/* Defer driver probe until matching spi
++	 * converter driver is registered
++	 */
++	axiadc_spidev->of_nspi = of_parse_phandle(pdev->dev.of_node,
++						  "spibus-connected", 0);
++	if (!axiadc_spidev->of_nspi) {
++		dev_err(&pdev->dev, "could not find spi node\n");
++		return -ENODEV;
++	}
++
++	ret = bus_for_each_dev(&spi_bus_type, NULL, axiadc_spidev,
++			       axiadc_attach_spi_client);
++	of_node_put(axiadc_spidev->of_nspi);
++	if (ret == 0)
++		return -EPROBE_DEFER;
++
++	if (!try_module_get(axiadc_spidev->owner))
++		return -ENODEV;
++
++	get_device(axiadc_spidev->dev_spi);
++
++	ret = devm_add_action_or_reset(&pdev->dev, axiadc_release_converter, axiadc_spidev);
++	if (ret)
++		return ret;
++
++	indio_dev = devm_iio_device_alloc(&pdev->dev, sizeof(*st));
++	if (!indio_dev)
++		return -ENOMEM;
++
++	st = iio_priv(indio_dev);
++
++	st->jdev = devm_jesd204_dev_register(&pdev->dev, &jesd204_axiadc_init);
++	if (IS_ERR(st->jdev))
++		return PTR_ERR(st->jdev);
++
++	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	st->regs_size = resource_size(mem);
++	st->regs = devm_ioremap_resource(&pdev->dev, mem);
++	if (IS_ERR(st->regs))
++		return PTR_ERR(st->regs);
++
++	st->dev_spi = axiadc_spidev->dev_spi;
++
++	platform_set_drvdata(pdev, indio_dev);
++
++	config = axiadc_read(st, ADI_REG_CONFIG);
++	st->ext_sync_avail = !!(config & ADI_EXT_SYNC);
++	st->dp_disable = false; /* FIXME: resolve later which reg & bit to read for this */
++
++	conv = to_converter(st->dev_spi);
++	if (IS_ERR(conv)) {
++		dev_err(&pdev->dev, "Failed to get converter device: %d\n",
++				(int)PTR_ERR(conv));
++		return PTR_ERR(conv);
++	}
++
++	iio_device_set_drvdata(indio_dev, conv);
++	conv->indio_dev = indio_dev;
++	mutex_init(&conv->lock);
++
++	if (conv->chip_info->num_shadow_slave_channels) {
++		u32 regs[2];
++		ret = of_property_read_u32_array(pdev->dev.of_node,
++				"slavecore-reg", regs, ARRAY_SIZE(regs));
++		if (!ret) {
++			st->slave_regs = ioremap(regs[0], regs[1]);
++			if (st->slave_regs)
++				st->have_slave_channels = conv->chip_info->
++					num_shadow_slave_channels;
++
++		}
++	}
++
++	st->additional_channel = of_property_read_bool(pdev->dev.of_node,
++		"adi,axi-additional-channel-available");
++
++	/* Reset all HDL Cores */
++	axiadc_write(st, ADI_REG_RSTN, 0);
++	mdelay(10);
++	axiadc_write(st, ADI_REG_RSTN, ADI_MMCM_RSTN);
++	mdelay(10);
++	axiadc_write(st, ADI_REG_RSTN, ADI_RSTN | ADI_MMCM_RSTN);
++
++	st->pcore_version = axiadc_read(st, ADI_AXI_REG_VERSION);
++
++	if (ADI_AXI_PCORE_VER_MAJOR(st->pcore_version) >
++		ADI_AXI_PCORE_VER_MAJOR(info->version)) {
++		dev_err(&pdev->dev, "Major version mismatch between PCORE and driver. Driver expected %d.%.2d.%c, PCORE reported %d.%.2d.%c\n",
++			ADI_AXI_PCORE_VER_MAJOR(info->version),
++			ADI_AXI_PCORE_VER_MINOR(info->version),
++			ADI_AXI_PCORE_VER_PATCH(info->version),
++			ADI_AXI_PCORE_VER_MAJOR(st->pcore_version),
++			ADI_AXI_PCORE_VER_MINOR(st->pcore_version),
++			ADI_AXI_PCORE_VER_PATCH(st->pcore_version));
++		return -ENODEV;
++	}
++
++	indio_dev->dev.parent = &pdev->dev;
++	indio_dev->name = pdev->dev.of_node->name;
++	indio_dev->modes = INDIO_DIRECT_MODE;
++	indio_dev->available_scan_masks = conv->chip_info->scan_masks;
++
++	axiadc_channel_setup(indio_dev, conv->chip_info->channel,
++			     st->dp_disable ? 0 : conv->chip_info->num_channels);
++
++	st->iio_info = axiadc_info;
++	st->iio_info.attrs = conv->attrs;
++	indio_dev->info = &st->iio_info;
++
++	if (conv->post_setup) {
++		ret = conv->post_setup(indio_dev);
++		if (ret < 0)
++			return ret;
++	}
++
++	if (!st->dp_disable && !axiadc_read(st, ADI_AXI_REG_ID) &&
++		of_find_property(pdev->dev.of_node, "dmas", NULL)) {
++		ret = axiadc_configure_ring_stream(indio_dev, NULL);
++		if (ret < 0)
++			return ret;
++	}
++
++	if (!st->dp_disable && of_property_read_bool(pdev->dev.of_node,
++		"adi,axi-decimation-core-available")) {
++		st->decimation_factor = 1;
++		st->gpio_decimation = devm_gpiod_get_optional(&pdev->dev,
++							      "decimation",
++							      GPIOD_OUT_LOW);
++		if (IS_ERR(st->gpio_decimation))
++			dev_err(&pdev->dev, "decimation gpio error\n");
++		skip = 0;
++	}
++
++	ret = axiadc_append_attrs(indio_dev,
++		&axiadc_dec_attribute_group, skip);
++	if (ret) {
++		dev_err(&pdev->dev,
++			"Failed to add sysfs attributes (%d)\n", ret);
++		return ret;
++	}
++
++	ret = devm_iio_device_register(&pdev->dev, indio_dev);
++	if (ret)
++		return ret;
++
++	if (iio_get_debugfs_dentry(indio_dev))
++		debugfs_create_file("pseudorandom_err_check", 0644,
++					iio_get_debugfs_dentry(indio_dev),
++					indio_dev, &axiadc_debugfs_pncheck_fops);
++
++	if (conv->post_iio_register) {
++		ret = conv->post_iio_register(indio_dev);
++		if (ret < 0)
++			dev_err(&pdev->dev,
++				"post_iio_register callback failed (%d)", ret);
++	}
++
++	ret = jesd204_fsm_start(st->jdev, JESD204_LINKS_ALL);
++	if (ret)
++		return ret;
++
++	dev_info(&pdev->dev,
++		 "ADI AIM (%d.%.2d.%c) at 0x%08llX mapped to 0x%p probed ADC %s as %s\n",
++		 ADI_AXI_PCORE_VER_MAJOR(st->pcore_version),
++		 ADI_AXI_PCORE_VER_MINOR(st->pcore_version),
++		 ADI_AXI_PCORE_VER_PATCH(st->pcore_version),
++		 (unsigned long long)mem->start, st->regs,
++		 conv->chip_info->name,
++		 axiadc_read(st, ADI_AXI_REG_ID) ? "SLAVE" : "MASTER");
++
++	return 0;
++}
++
++static struct platform_driver axiadc_driver = {
++	.driver = {
++		.name = KBUILD_MODNAME,
++		.owner = THIS_MODULE,
++		.of_match_table = axiadc_of_match,
++	},
++	.probe		= axiadc_probe,
++};
++
++module_platform_driver(axiadc_driver);
++
++MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
++MODULE_DESCRIPTION("Analog Devices ADI-AIM");
++MODULE_LICENSE("GPL v2");
 diff --git a/include/dt-bindings/iio/adc/adi,ad9361.h b/include/dt-bindings/iio/adc/adi,ad9361.h
 new file mode 100644
-index 00000000..add7df19
+index 0000000..add7df1
 --- /dev/null
 +++ b/include/dt-bindings/iio/adc/adi,ad9361.h
 @@ -0,0 +1,21 @@
@@ -14830,5 +16498,585 @@ index 00000000..add7df19
 +#define H	(AD9361_EXT_BAND_CTL_OP_HIGH)
 +#define I	(AD9361_EXT_BAND_CTL_OP_INPUT)
 +#endif
++
++#endif
+diff --git a/include/dt-bindings/jesd204/device-states.h b/include/dt-bindings/jesd204/device-states.h
+new file mode 100644
+index 0000000..aa197b2
+--- /dev/null
++++ b/include/dt-bindings/jesd204/device-states.h
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Copyright (c) 2020 Analog Devices, Inc.
++ */
++
++#ifndef _DT_BINDINGS_JESD204_DEVICE_STATE_H
++#define _DT_BINDINGS_JESD204_DEVICE_STATE_H
++
++/* These *MUST* be in a monotonic order */
++#define JESD204_FSM_STATE_DEVICE_INIT			0
++#define JESD204_FSM_STATE_LINK_INIT			1
++#define JESD204_FSM_STATE_LINK_SUPPORTED		2
++#define JESD204_FSM_STATE_LINK_PRE_SETUP		3
++#define JESD204_FSM_STATE_CLK_SYNC_STAGE1		4
++#define JESD204_FSM_STATE_CLK_SYNC_STAGE2		5
++#define JESD204_FSM_STATE_CLK_SYNC_STAGE3		6
++#define JESD204_FSM_STATE_LINK_SETUP			7
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE1		8
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE2		9
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE3		10
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE4		11
++#define JESD204_FSM_STATE_OPT_SETUP_STAGE5		12
++#define JESD204_FSM_STATE_CLOCKS_ENABLE			13
++#define JESD204_FSM_STATE_LINK_ENABLE			14
++#define JESD204_FSM_STATE_LINK_RUNNING			15
++#define JESD204_FSM_STATE_OPT_POST_RUNNING_STAGE	16
++
++/* Update this when adding states */
++#define JESD204_FSM_STATE_LAST			(JESD204_FSM_STATE_OPT_POST_RUNNING_STAGE)
++
++#define JESD204_FSM_STATES_NUM			(JESD204_FSM_STATE_LAST + 1)
++
++#endif /* _DT_BINDINGS_JESD204_DEVICE_STATE_H */
+diff --git a/include/linux/clk/clkscale.h b/include/linux/clk/clkscale.h
+new file mode 100644
+index 0000000..bea028c
+--- /dev/null
++++ b/include/linux/clk/clkscale.h
+@@ -0,0 +1,58 @@
++#ifndef CLK_SCLAE_H_
++#define CLK_SCLAE_H_
++
++#include <linux/clk.h>
++#include <linux/of.h>
++#include <linux/math64.h>
++
++
++struct clock_scale {
++	u32 mult;
++	u32 div;
++};
++
++static inline int of_clk_get_scale(struct device_node *np, const char *name, struct clock_scale *scale)
++{
++	char property[80];
++	u32 vals[2];
++	int ret;
++
++	scale->mult = 1;
++	scale->div = 1;
++
++	ret = snprintf(property, 80,  "%s%sclock-scales", name ? name : "", name ? "-" : "");
++	if (ret < 0)
++		return -EINVAL;
++
++	ret = of_property_read_u32_array(np, property, vals, 2);
++	if (!ret)  {
++		scale->mult = vals[0];
++		scale->div = vals[1] ? vals[1] : 1;
++	}
++
++	return ret;
++}
++
++static inline unsigned long long clk_get_rate_scaled(struct clk *clk, struct clock_scale *scale)
++{
++	return div_u64((u64)clk_get_rate(clk) * scale->div, scale->mult);
++
++}
++
++static inline unsigned long long clk_set_rate_scaled(struct clk *clk, unsigned long long rate, struct clock_scale *scale)
++{
++	return clk_set_rate(clk, div_u64(rate * scale->mult, scale->div));
++}
++
++static inline unsigned long to_ccf_scaled(unsigned long long rate, struct clock_scale *scale)
++{
++
++	return div_u64(rate * scale->mult, scale->div);
++}
++
++static inline unsigned long long from_ccf_scaled(unsigned long long rate, struct clock_scale *scale)
++{
++	return div_u64(rate * scale->div, scale->mult);
++}
++
++#endif /* CLK_SCLAE_H_ */
+diff --git a/include/linux/jesd204/adi-common.h b/include/linux/jesd204/adi-common.h
+new file mode 100644
+index 0000000..3ca251d
+--- /dev/null
++++ b/include/linux/jesd204/adi-common.h
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Analog Devices common definitions for JESD204 IP cores
++ *
++ * Copyright 2020 Analog Devices Inc.
++ *
++ * https://wiki.analog.com/resources/fpga/docs/axi_ip
++ * https://wiki.analog.com/resources/fpga/docs/hdl/regmap
++ * https://wiki.analog.com/resources/fpga/peripherals/jesd204/jesd204_tpl_adc
++ * https://wiki.analog.com/resources/fpga/peripherals/jesd204/jesd204_tpl_dac
++ */
++#ifndef _ADI_JESD204_H_
++#define _ADI_JESD204_H_
++
++/* JESD TPL COMMON */
++
++#define ADI_JESD204_REG_TPL_CNTRL		0x0200
++#define ADI_JESD204_REG_TPL_STATUS		0x0204
++#define ADI_JESD204_REG_TPL_DESCRIPTOR_1	0x0240
++#define ADI_JESD204_REG_TPL_DESCRIPTOR_2	0x0244
++
++#define ADI_JESD204_TPL_TO_M(x)			(((x) >> 0) & 0xFF)
++#define ADI_JESD204_TPL_TO_L(x)			(((x) >> 8) & 0xFF)
++#define ADI_JESD204_TPL_TO_S(x)			(((x) >> 16) & 0xFF)
++#define ADI_JESD204_TPL_TO_F(x)			(((x) >> 24) & 0xFF)
++
++#define ADI_JESD204_TPL_TO_N(x)			(((x) >> 0) & 0xFF)
++#define ADI_JESD204_TPL_TO_NP(x)		(((x) >> 8) & 0xFF)
++
++#define ADI_JESD204_TPL_TO_PROFILE_NUM(x)	(((x) >> 0) & 0xF)
++#define ADI_JESD204_PROFILE_SEL(x)		((x) & 0xF)
++
++#endif
+diff --git a/include/linux/jesd204/jesd204.h b/include/linux/jesd204/jesd204.h
+new file mode 100644
+index 0000000..b24c1a8
+--- /dev/null
++++ b/include/linux/jesd204/jesd204.h
+@@ -0,0 +1,432 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/**
++ * The JESD204 framework
++ *
++ * Copyright (c) 2019 Analog Devices Inc.
++ */
++#ifndef _JESD204_H_
++#define _JESD204_H_
++
++#include <linux/kern_levels.h>
++#include <dt-bindings/jesd204/device-states.h>
++
++struct jesd204_dev;
++
++enum jesd204_subclass {
++	JESD204_SUBCLASS_0,
++	JESD204_SUBCLASS_1,
++	JESD204_SUBCLASS_2,
++};
++
++enum jesd204_version {
++	JESD204_VERSION_A,
++	JESD204_VERSION_B,
++	JESD204_VERSION_C,
++};
++
++/* JESD204C Supported encoding scheme */
++enum jesd204_encoder {
++	JESD204_ENCODER_UNKNOWN,
++	JESD204_ENCODER_8B10B,
++	JESD204_ENCODER_64B66B,
++	JESD204_ENCODER_64B80B,
++
++	JESD204_ENCODER_MAX
++};
++
++enum jesd204_sysref_mode {
++	JESD204_SYSREF_DISABLED,
++	JESD204_SYSREF_CONTINUOUS,
++	JESD204_SYSREF_ONESHOT,
++};
++
++enum jesd204_state_change_result {
++	JESD204_STATE_CHANGE_ERROR = -1,
++	JESD204_STATE_CHANGE_DEFER = 0,
++	JESD204_STATE_CHANGE_DONE,
++};
++
++#define JESD204_LINKS_ALL		((unsigned int)(-1))
++
++#define JESD204_LMFC_OFFSET_UNINITIALIZED	((u16)-1)
++
++/** struct jesd204_sysref - JESD204 parameters for SYSREF
++ * @mode:			SYSREF mode (see @jesd204_sysref_mode)
++ * @capture_falling_edge:	true if it should capture falling edge
++ * @valid_falling_edge:		true if falling edge should be valid
++ * @lmfc_offset:		offset for LMFC
++ */
++struct jesd204_sysref {
++	enum jesd204_sysref_mode	mode;
++	u8				capture_falling_edge;
++	u8				valid_falling_edge;
++	u16				lmfc_offset;
++};
++
++/**
++ * struct jesd204_link - JESD204 link configuration settings
++ * @link_id:			JESD204 link ID provided via DT configuration
++ * @error:			error code for this JESD204 link
++ * @is_transmit:		true if this link is transmit (digital to analog)
++ * @sample_rate:		sample rate for the link
++ * @sample_rate_div:		optional sample rate divider for the link
++ * 					final rate = sample_rate / sample_rate_div
++ * @num_lanes:			number of JESD204 lanes (L)
++ * @num_converters:		number of converters per link (M)
++ * @octets_per_frame:		number of octets per frame (F)
++ * @frames_per_multiframe:	number of frames per frame (K)
++ * @num_of_multiblocks_in_emb:	number of multiblocks in extended multiblock (E) (JESD204C)
++ * @bits_per_sample:		number of bits per sample (N')
++ * @converter_resolution:	converter resolution (N)
++ * @jesd_version:		JESD204 version (A, B or C) (JESDV)
++ * @jesd_encoder:		JESD204C encoder (8B10B, 64B66B, 64B80B)
++ * @subclass:			JESD204 subclass (0,1 or 2) (SUBCLASSV)
++ * @device_id:			device ID (DID)
++ * @bank_id:			bank ID (BID)
++ * @scrambling:			true if scrambling enabled (SCR)
++ * @high_density:		true if high-density format is used (HD)
++ * @ctrl_words_per_frame_clk:	number of control words per frame clock
++ *				period (CF)
++ * @ctrl_bits_per_sample:	number of control bits per sample (CS)
++ * @samples_per_conv_frame:	number of samples per converter per frame
++ *				cycle (S)
++ * @lane_ids:			array of lane IDs (LID); note that this is an
++ *				array the size of @num_lanes
++ * @sysref:			JESD204 sysref config, see @jesd204_sysref
++ * @dac_adj_resolution_steps:	number of adjustment resolution steps to adjust
++ *				DAC LMFC (ADJCNT) - Subclass 2 only
++ * @dac_adj_direction:		direction to adjust DAC LMFC (ADJDIR)
++ *				Subclass 2 only
++ * @dac_phase_adj:		true to do phase adjustment request to DAC
++ *				Subclass 2 only
++ */
++struct jesd204_link {
++	u32 link_id;
++	int error;
++
++	u64 sample_rate;
++	u32 sample_rate_div;
++
++	bool is_transmit;
++
++	u8 num_lanes;
++	u8 num_converters;
++	u8 octets_per_frame;
++	u16 frames_per_multiframe;
++	u8 num_of_multiblocks_in_emb; /* E */
++
++	u8 bits_per_sample;
++
++	u8 converter_resolution;
++	u8 jesd_version;
++	u8 jesd_encoder;
++	u8 subclass;
++
++	u8 device_id;
++	u8 bank_id;
++
++	u8 scrambling;
++	u8 high_density;
++
++	u8 ctrl_words_per_frame_clk;
++	u8 ctrl_bits_per_sample;
++	u8 samples_per_conv_frame;
++
++	u8 *lane_ids;
++
++	struct jesd204_sysref sysref;
++
++	/* Subclass 2 only */
++	u8 dac_adj_resolution_steps;
++	u8 dac_adj_direction;
++	u8 dac_phase_adj;
++};
++
++enum jesd204_state_op_reason {
++	JESD204_STATE_OP_REASON_INIT,
++	JESD204_STATE_OP_REASON_UNINIT,
++};
++
++static inline const char *jesd204_encoder_str(enum jesd204_encoder enc)
++{
++	switch (enc) {
++	case JESD204_ENCODER_8B10B:
++		return "8b10b";
++	case JESD204_ENCODER_64B66B:
++		return "64b66b";
++	case JESD204_ENCODER_64B80B:
++		return "64b80b";
++	default:
++		return "unknown";
++	}
++}
++
++static inline const char *jesd204_state_op_reason_str(enum jesd204_state_op_reason reason)
++{
++	switch (reason) {
++	case JESD204_STATE_OP_REASON_INIT:
++		return "initialization";
++	case JESD204_STATE_OP_REASON_UNINIT:
++		return "uninitialization";
++	default:
++		return "unknown";
++	}
++}
++
++typedef int (*jesd204_sysref_cb)(struct jesd204_dev *jdev);
++
++typedef int (*jesd204_dev_cb)(struct jesd204_dev *jdev,
++			      enum jesd204_state_op_reason reason);
++
++typedef int (*jesd204_link_cb)(struct jesd204_dev *jdev,
++			       enum jesd204_state_op_reason,
++			       struct jesd204_link *lnk);
++
++typedef void (*jesd204_fsm_finished_cb)(struct jesd204_dev *jdev,
++					const struct jesd204_link * const *links,
++					unsigned int num_links);
++
++enum jesd204_state_op_mode {
++	JESD204_STATE_OP_MODE_PER_LINK,
++	JESD204_STATE_OP_MODE_PER_DEVICE,
++};
++
++/**
++ * struct jesd204_state_op - JESD204 device per-state op
++ * @mode:		mode for this state op, depending on this @per_device or @per_link is called
++ * @per_device:		op called for each JESD204 **device** during a transition
++ * @per_link		op called for each JESD204 **link** individually during a transition
++ * // FIXME: maybe pass 'struct jesd204_sysref' for post_state_sysref, to make this configurable? we'll see later
++ * // FIXME: for now, the device should also be a top-level device, in case of multi-chip setups
++ * @post_state_sysref:	true if a SYSREF should be issued after the state change
++ */
++struct jesd204_state_op {
++	enum jesd204_state_op_mode	mode;
++	jesd204_dev_cb			per_device;
++	jesd204_link_cb			per_link;
++	bool				post_state_sysref;
++};
++
++enum jesd204_dev_op {
++	JESD204_OP_DEVICE_INIT,
++	JESD204_OP_LINK_INIT,
++	JESD204_OP_LINK_SUPPORTED,
++	JESD204_OP_LINK_PRE_SETUP,
++	JESD204_OP_CLK_SYNC_STAGE1,
++	JESD204_OP_CLK_SYNC_STAGE2,
++	JESD204_OP_CLK_SYNC_STAGE3,
++	JESD204_OP_LINK_SETUP,
++	JESD204_OP_OPT_SETUP_STAGE1,
++	JESD204_OP_OPT_SETUP_STAGE2,
++	JESD204_OP_OPT_SETUP_STAGE3,
++	JESD204_OP_OPT_SETUP_STAGE4,
++	JESD204_OP_OPT_SETUP_STAGE5,
++	JESD204_OP_CLOCKS_ENABLE,
++	JESD204_OP_LINK_ENABLE,
++	JESD204_OP_LINK_RUNNING,
++	JESD204_OP_OPT_POST_RUNNING_STAGE,
++
++	__JESD204_MAX_OPS,
++};
++
++/**
++ * struct jesd204_dev_data - JESD204 device initialization data
++ * @sysref_cb:		SYSREF callback, if this device/driver supports it
++ * @fsm_finished_cb:	callback for when the FSM finishes a series of transitions
++ * @sizeof_priv:	amount of data to allocate for private information
++ * @links:		JESD204 initial link configuration
++ * @max_num_links:	maximum number of JESD204 links this device can support
++ * @num_retries:	number of retries in case of error (only for top-level device)
++ * @state_ops:		ops for each state transition of type @struct jesd204_state_op
++ */
++struct jesd204_dev_data {
++	jesd204_sysref_cb			sysref_cb;
++	jesd204_fsm_finished_cb			fsm_finished_cb;
++	size_t					sizeof_priv;
++	const struct jesd204_link		*links;
++	unsigned int				max_num_links;
++	unsigned int				num_retries;
++	struct jesd204_state_op			state_ops[__JESD204_MAX_OPS];
++};
++
++#ifdef CONFIG_JESD204
++
++struct jesd204_dev *devm_jesd204_dev_register(struct device *dev,
++					      const struct jesd204_dev_data *i);
++
++int jesd204_get_active_links_num(struct jesd204_dev *jdev);
++
++int jesd204_get_links_data(struct jesd204_dev *jdev,
++			   struct jesd204_link ** const links,
++			   const unsigned int num_links);
++
++int jesd204_fsm_start(struct jesd204_dev *jdev, unsigned int link_idx);
++void jesd204_fsm_stop(struct jesd204_dev *jdev, unsigned int link_idx);
++
++int jesd204_fsm_resume(struct jesd204_dev *jdev, unsigned int link_idx);
++
++void jesd204_fsm_clear_errors(struct jesd204_dev *jdev, unsigned int link_idx);
++
++struct device *jesd204_dev_to_device(struct jesd204_dev *jdev);
++struct jesd204_dev *jesd204_dev_from_device(struct device *dev);
++
++void *jesd204_dev_priv(struct jesd204_dev *jdev);
++
++int jesd204_link_get_lmfc_lemc_rate(struct jesd204_link *lnk,
++				    unsigned long *rate_hz);
++int jesd204_link_get_rate_khz(struct jesd204_link *lnk,
++				 unsigned long *lane_rate_khz);
++int jesd204_link_get_rate(struct jesd204_link *lnk, u64 *lane_rate_hz);
++int jesd204_link_get_device_clock(struct jesd204_link *lnk,
++				  unsigned long *device_clock);
++
++int jesd204_sysref_async(struct jesd204_dev *jdev);
++
++int jesd204_sysref_async_force(struct jesd204_dev *jdev);
++
++bool jesd204_dev_is_top(struct jesd204_dev *jdev);
++
++bool jesd204_link_get_paused(const struct jesd204_link *lnk);
++
++const char *jesd204_link_get_state_str(const struct jesd204_link *lnk);
++
++void jesd204_copy_link_params(struct jesd204_link *dst,
++			      const struct jesd204_link *src);
++
++#else /* !IS_ENABLED(CONFIG_JESD204) */
++
++static inline struct jesd204_dev *devm_jesd204_dev_register(
++		struct device *dev, const struct jesd204_dev_data *init)
++{
++	return NULL;
++}
++
++static inline int jesd204_get_active_links_num(struct jesd204_dev *jdev)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_get_links_data(struct jesd204_dev *jdev,
++					 struct jesd204_link * const *links,
++					 const unsigned int num_links)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_fsm_start(struct jesd204_dev *jdev,
++				    unsigned int link_idx)
++{
++	return 0;
++}
++
++static inline void jesd204_fsm_stop(struct jesd204_dev *jdev,
++				    unsigned int link_idx) {}
++
++static inline int jesd204_fsm_resume(struct jesd204_dev *jdev,
++				     unsigned int link_idx)
++{
++	return 0;
++}
++
++static inline void jesd204_fsm_clear_errors(struct jesd204_dev *jdev,
++					    unsigned int link_idx) {}
++
++static inline struct device *jesd204_dev_to_device(struct jesd204_dev *jdev)
++{
++	return NULL;
++}
++
++static inline struct jesd204_dev *jesd204_dev_from_device(struct device *dev)
++{
++	return NULL;
++}
++
++static inline void *jesd204_dev_priv(struct jesd204_dev *jdev)
++{
++	return NULL;
++}
++
++static inline int jesd204_link_get_lmfc_lemc_rate(struct jesd204_link *lnk,
++						  unsigned long *rate_hz)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_link_get_rate_khz(struct jesd204_link *lnk,
++					    unsigned long *lane_rate_khz)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_link_get_rate(struct jesd204_link *lnk,
++					u64 *lane_rate_hz)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_link_get_device_clock(struct jesd204_link *lnk,
++						unsigned long *device_clock)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_sysref_async(struct jesd204_dev *jdev)
++{
++	return -ENOTSUPP;
++}
++
++static inline int jesd204_sysref_async_force(struct jesd204_dev *jdev)
++{
++	return -ENOTSUPP;
++}
++
++static inline bool jesd204_dev_is_top(struct jesd204_dev *jdev)
++{
++	return false;
++}
++
++static inline bool jesd204_link_get_paused(const struct jesd204_link *lnk)
++{
++	return false;
++}
++
++static inline const char *jesd204_link_get_state_str(const struct jesd204_link *lnk)
++{
++	return NULL;
++}
++
++static inline void jesd204_copy_link_params(struct jesd204_link *dst,
++					    const struct jesd204_link *src) {}
++
++#endif /* #ifdef CONFIG_JESD204 */
++
++#if defined(CONFIG_PRINTK) && defined(CONFIG_JESD204)
++
++__printf(3, 4)
++void jesd204_printk(const char *level, const struct jesd204_dev *jdev,
++		    const char *fmt, ...);
++#else
++
++static inline __printf(3, 4)
++void jesd204_printk(const char *level, const struct jesd204_dev *jdev,
++		    const char *fmt, ...)
++{}
++
++#endif /* #ifdef CONFIG_PRINTK */
++
++#define jesd204_emerg(dev, fmt, ...)					\
++	jesd204_printk(KERN_EMERG, dev, fmt, ##__VA_ARGS__)
++#define jesd204_crit(dev, fmt, ...)					\
++	jesd204_printk(KERN_CRIT, dev, fmt, ##__VA_ARGS__)
++#define jesd204_alert(dev, fmt, ...)					\
++	jesd204_printk(KERN_ALERT, dev, fmt, ##__VA_ARGS__)
++#define jesd204_err(dev, fmt, ...)					\
++	jesd204_printk(KERN_ERR, dev, fmt, ##__VA_ARGS__)
++#define jesd204_warn(dev, fmt, ...)					\
++	jesd204_printk(KERN_WARNING, dev, fmt, ##__VA_ARGS__)
++#define jesd204_notice(dev, fmt, ...)					\
++	jesd204_printk(KERN_NOTICE, dev, fmt, ##__VA_ARGS__)
++#define jesd204_info(dev, fmt, ...)					\
++	jesd204_printk(KERN_INFO, dev, fmt, ##__VA_ARGS__)
 +
 +#endif

@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andreas Kurth <andreas.kurth@epfl.ch>
+Date: Mon, 17 Mar 2026 00:00:00 +0100
+Subject: [PATCH] gpio: mmio: add OpenTitan GPIO compatible string
+
+Add "opentitan,gpio" to the bgpio OF match table so the generic
+gpio-mmio driver probes OpenTitan GPIO peripherals. The Cheshire
+(Theshire) SoC uses OpenTitan GPIO IP for AD9361 reset control.
+
+Requires CONFIG_GPIO_GENERIC_PLATFORM=y in defconfig.
+
+Signed-off-by: Andreas Kurth <andreas.kurth@epfl.ch>
+---
+ drivers/gpio/gpio-mmio.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpio/gpio-mmio.c b/drivers/gpio/gpio-mmio.c
+--- a/drivers/gpio/gpio-mmio.c
++++ b/drivers/gpio/gpio-mmio.c
+@@ -688,6 +688,7 @@ static const struct of_device_id bgpio_of_match[] = {
+ 	{ .compatible = "ni,169445-nand-gpio" },
++	{ .compatible = "opentitan,gpio" },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, bgpio_of_match);

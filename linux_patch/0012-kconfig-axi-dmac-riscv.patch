@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andreas Kurth <andreas.kurth@epfl.ch>
+Date: Mon, 17 Mar 2026 00:00:00 +0100
+Subject: [PATCH] dma: axi-dmac: allow building on RISC-V
+
+The Analog Devices AXI-DMAC driver is architecture-neutral (uses
+standard readl/writel, ioremap, DMA engine APIs) but the Kconfig
+restricts it to Zynq/Microblaze/Nios2/SoCFPGA. Add RISCV to the
+depends line so Theshire (CVA6 RISC-V) can use it.
+
+Signed-off-by: Andreas Kurth <andreas.kurth@epfl.ch>
+---
+ drivers/dma/Kconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/dma/Kconfig b/drivers/dma/Kconfig
+index 1acab26..2222222 100644
+--- a/drivers/dma/Kconfig
++++ b/drivers/dma/Kconfig
+@@ -101,7 +101,7 @@
+ config AXI_DMAC
+ 	tristate "Analog Devices AXI-DMAC DMA support"
+-	depends on MICROBLAZE || NIOS2 || ARCH_ZYNQ || ARCH_ZYNQMP || ARCH_SOCFPGA || COMPILE_TEST
++	depends on MICROBLAZE || NIOS2 || ARCH_ZYNQ || ARCH_ZYNQMP || ARCH_SOCFPGA || RISCV || COMPILE_TEST
+ 	select DMA_ENGINE
+ 	select DMA_VIRTUAL_CHANNELS
+ 	select REGMAP_MMIO

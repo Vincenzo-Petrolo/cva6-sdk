@@ -6,12 +6,11 @@ For the OpenWiFi and AD9361 patch space, the maintenance goal is to minimize loc
 
 ## Contents
 
-- `0009-*`: refreshed AD9361 base import
-- `0010-*`: refreshed OpenWiFi driver import
-- `0011-*`: external `openwifi`-derived `ad9361.c` overlay
-- `0012-*`: external `openwifi`-derived `ad9361_private.h` overlay
-- `0013-*`: external `openwifi`-derived `ad9361_conv.c` overlay
-- `0014-*`: external `openwifi`-derived `dma-axi-dmac.c` overlay
+- `0009-adi-iio.patch`: ADI IIO drivers (AD9361 RF transceiver + cf_axi_adc HDL core driver). Imported from openwifi's patched `adi-linux-64` tree with vanilla-5.10.7 compatibility fixups. Regenerated via `util/regen_adi_iio_patch.sh`.
+- `0010-openwifi.patch`: OpenWiFi driver import (sdr, tx_intf, rx_intf, xpu, etc.). Regenerated via `util/regen_openwifi_patch.sh`.
+- `0011-dma-axi-dmac.patch`: ADI axi-dmac DMA driver with cyclic S2MM fixes for OpenWiFi RX.
+- `0012-kconfig-axi-dmac-riscv.patch`: Kconfig glue for axi-dmac on RISC-V.
+- `0013-gpio-mmio-opentitan.patch`: GPIO MMIO driver for OpenTitan.
 
 ## Canonical external sources
 
@@ -88,61 +87,37 @@ In other words, the goal is not to preserve the old `0015` / `0016` / `0017` spl
 
 ## Current stack
 
-### `0009-iio-adc-add-AD9361-driver-from-ADI-adi-5.10.0.patch`
+### `0009-adi-iio.patch`
 
-This patch now includes the AD9361 base/header adjustments needed by the current external `openwifi` ADI overlay, including:
+ADI IIO drivers: AD9361 RF transceiver + cf_axi_adc AXI ADC/DAC HDL core driver.
 
-- `<linux/mutex.h>` include in `ad9361.h`
-- `PL_INTF_CLK` in `enum ad9361_clocks`
-- `struct mutex lock` in `struct ad9361_rf_phy`
+**Source**: openwifi's patched `adi-linux-64` working tree (ADI upstream `2022_R2` branch + openwifi overlay from `patches/adi-linux-64/files/`).
 
-That refresh is what allows the current external `openwifi` `ad9361.c` overlay to apply locally without keeping a separate compatibility crumb.
+**Regeneration**: `source source_toolchains.sh && bash util/regen_adi_iio_patch.sh`
+
+The script copies files from the openwifi working tree, applies vanilla-5.10.7 compatibility fixups (IIO_CHAN_INFO_CALIBPHASE removal, DMA ring buffer stubbing, .read_label removal, IIO_VAL_INT_64 replacement, ADI_AXI_REG_ID guard), and diffs against the vanilla Kconfig/Makefile.
+
+**Files included**: ad9361.c, ad9361_conv.c, ad9361_private.h, ad9361.h, ad9361_regs.h, ad9361_ext_band_ctrl.c, cf_axi_adc_core.c, cf_axi_adc.h, Kconfig, Makefile, dt-bindings headers, jesd204 headers, clkscale.h.
 
 ### `0010-openwifi.patch`
 
-This is the base OpenWiFi import into the Theshire kernel tree.
+OpenWiFi driver import (sdr, tx_intf, rx_intf, xpu, openofdm_tx/rx, side_ch).
 
-When this patch is refreshed from the current external `openwifi` source, it must include the current file set, including:
+**Regeneration**: `source source_toolchains.sh && bash util/regen_openwifi_patch.sh`
 
-- `openwifi/driver/sdr_utils.c`
+Uses `0010-openwifi.manifest.tsv` as the import manifest. `git_rev.h` and `pre_def.h` are generated deterministically from the openwifi repo state.
 
-The maintained regeneration inputs are:
+### `0011-dma-axi-dmac.patch`
 
-- `0010-openwifi.manifest.tsv`
-- `util/regen_openwifi_patch.sh`
+ADI axi-dmac DMA driver with OpenWiFi cyclic S2MM fixes. The `ow_rx_force_flag_last` knob defaults to `false`.
 
-That script does not copy the full Linux tree. It stages only the path set owned by `0010` from the pristine Linux tarball baseline, overlays the refreshed canonical OpenWiFi files from `OPENWIFI_SRC`, regenerates the Linux glue hunks, and emits a new `0010-openwifi.patch`. Set `THS_OPENWIFI_SRC` in `source_toolchains.user.sh`, then run `source source_toolchains.sh` before using the default command.
+### `0012-kconfig-axi-dmac-riscv.patch`
 
-For deterministic regeneration, the script does not copy the build-generated helper headers verbatim:
+Kconfig glue enabling axi-dmac build on RISC-V.
 
-- `git_rev.h` is emitted from the external `openwifi` repo HEAD
-- `pre_def.h` is emitted from the canonical OpenWiFi top-level defaults (`ENABLE_DEBUG`, `ENABLE_RX_SCAN_ALL_SLOTS`)
+### `0013-gpio-mmio-opentitan.patch`
 
-### `0011-ad9361.patch`
-
-This patch is the local numbered form of the external `openwifi` ADI overlay `ad9361.c`.
-
-### `0012-ad9361_private.patch`
-
-This patch is the local numbered form of the external `openwifi` ADI overlay `ad9361_private.h`.
-
-### `0013-ad9361_conv.patch`
-
-This patch is the local numbered form of the external `openwifi` ADI overlay `ad9361_conv.c`.
-
-### `0014-dma-axi-dmac.patch`
-
-This patch is the local numbered form of the external `openwifi` ADI overlay `dma-axi-dmac.c`.
-
-The carried `ow_rx_force_flag_last` knob remains present with its upstream OpenWiFi default (`false`). The current Theshire flow does not add a separate runtime override yet. Treat that default as the baseline until board validation proves that strict packet-boundary forcing is required on the Theshire RX path.
-
-### AD9361 binding-doc diff
-
-The external `openwifi` overlay also carries:
-
-- `openwifi/patches/adi-linux-64/diffs/Documentation/devicetree/bindings/iio/adc/adi,ad9361.txt.patch`
-
-That documentation diff is not part of the active local Theshire patch stack today because the current local Linux 5.10.7 kernel tree does not carry the target `adi,ad9361.txt` file in the same form as the external ADI tree.
+GPIO MMIO driver for OpenTitan SPI GPIO controller.
 
 ## Future update workflow
 
