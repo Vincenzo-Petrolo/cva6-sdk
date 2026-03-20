@@ -1,0 +1,63 @@
+#!/bin/sh
+# OpenWiFi RF initialization (runs after kernel boot, drivers already probed)
+# Drivers are built-in (CONFIG_OPENWIFI=y) — no insmod needed.
+# SOURCE OF TRUTH: openwifi/user_space/rf_init_11n.sh + agc_settings.sh
+# UPDATE TRIGGER: If rf_init_11n.sh values change in openwifi repo
+#
+# PROBE ORDER (CONFIG_OPENWIFI=y built-in): Link order in drivers/Makefile
+# controls device_initcall order. sdr.o MUST be last — it calls sub-driver
+# API function pointers (tx_intf_api->*, rx_intf_api->*) that are only
+# populated when those sub-drivers probe first. Mirrors upstream wgd.sh
+# module load order: tx_intf rx_intf openofdm_tx openofdm_rx xpu side_ch sdr.
+#
+# NOTE: sdr.c uses -ENODEV (not -EPROBE_DEFER) for AD9361 lookup.
+# If ad9361-phy is not probed before sdr, sdr0 won't appear. In practice
+# SPI bus inits before AXI platform bus, so this works. If sdr0 is missing,
+# check dmesg for AD9361 probe errors first.
+
+# Find AD9361 IIO device
+IIO=""
+for d in /sys/bus/iio/devices/iio:device*; do
+  [ "$(cat "$d/name" 2>/dev/null)" = "ad9361-phy" ] && IIO="$d" && break
+done
+[ -z "$IIO" ] && echo "AD9361 not found" && exit 1
+
+# Verify FIR filter exists before proceeding
+[ -f /usr/bin/openwifi_ad9361_fir_tx_0MHz_11n.ftr ] || { echo "FIR filter missing"; exit 1; }
+
+# Configure RF parameters (from rf_init_11n.sh)
+cd "$IIO"
+echo 25215513  > in_voltage_rf_bandwidth
+echo 25215414  > out_voltage_rf_bandwidth
+echo 40000000  > in_voltage_sampling_frequency
+echo 40000000  > out_voltage_sampling_frequency
+echo 1000000000 > out_altvoltage0_RX_LO_frequency
+echo 1000000000 > out_altvoltage1_TX_LO_frequency
+
+# Load FIR filter
+cat /usr/bin/openwifi_ad9361_fir_tx_0MHz_11n.ftr > filter_fir_config
+echo 1 > in_voltage_filter_fir_en
+echo 1 > out_voltage_filter_fir_en
+
+# AGC: fast attack mode
+echo fast_attack > in_voltage0_gain_control_mode
+echo fast_attack > in_voltage1_gain_control_mode
+echo 70  > in_voltage0_hardwaregain
+echo 70  > in_voltage1_hardwaregain
+echo -89 > out_voltage0_hardwaregain
+echo 0   > out_voltage1_hardwaregain
+
+# AGC register tuning (from agc_settings.sh)
+mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+DBG=/sys/kernel/debug/iio/$(basename "$IIO")/direct_reg_access
+if [ -f "$DBG" ]; then
+  echo 0x15C 0x70 > "$DBG"; echo 0x106 0x77 > "$DBG"
+  echo 0x103 0x1C > "$DBG"; echo 0x101 0x0C > "$DBG"
+  # WARNING from agc_settings.sh: DO NOT change 0x48 to 0x4A for reg 0x110!
+  # Otherwise: "did not acknowledge authentication response" failure.
+  echo 0x110 0x48 > "$DBG"; echo 0x114 0xb0 > "$DBG"
+  echo 0x115 0x80 > "$DBG"; echo 0x10A 0x18 > "$DBG"
+  echo 0x0fa 0x5  > "$DBG"; echo 0x0fa 0xE5 > "$DBG"
+else echo "WARNING: debugfs unavailable, AGC tuning skipped"; fi
+
+echo "OpenWiFi RF initialized"

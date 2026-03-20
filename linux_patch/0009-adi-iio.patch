@@ -14882,7 +14882,7 @@ new file mode 100644
 index 0000000..a0f73e8
 --- /dev/null
 +++ b/drivers/iio/adc/cf_axi_adc.h
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,327 @@
 +/*
 + * ADI-AIM ADI ADC Interface Module
 + *
@@ -15181,9 +15181,6 @@ index 0000000..a0f73e8
 +			enum iio_event_type type,
 +			enum iio_event_direction dir,
 +			int state);
-+
-+	int (*read_label)(struct iio_dev *indio_dev,
-+			const struct iio_chan_spec *chan, char *label);
 +
 +	int (*post_setup)(struct iio_dev *indio_dev);
 +	int (*post_iio_register)(struct iio_dev *indio_dev);
