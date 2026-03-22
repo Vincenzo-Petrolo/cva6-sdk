@@ -63,4 +63,13 @@ if [ -f "$DBG" ]; then
   echo 0x0fa 0x5  > "$DBG"; echo 0x0fa 0xE5 > "$DBG"
 else echo "WARNING: debugfs unavailable, AGC tuning skipped"; fi
 
+# Set regulatory domain for proper TX power levels.
+# Without this, country 00 caps TX at 6 dBm — too low for AP to hear auth frames.
+# Requires BR2_PACKAGE_WIRELESS_REGDB=y in buildroot config.
+# Change "CH" to your country code if deploying outside Switzerland.
+iw reg set CH 2>/dev/null || true
+
+# Suppress rx_irq console spam (messages still available in dmesg)
+echo 4 > /proc/sys/kernel/printk
+
 echo "OpenWiFi RF initialized"
