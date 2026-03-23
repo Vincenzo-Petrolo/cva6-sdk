@@ -13,7 +13,7 @@ index dcecc9f..e19c7d4 100644
 +	help
 +	  Say Y or M to enable the OpenWiFi driver
 diff --git a/drivers/Makefile b/drivers/Makefile
-index 5762280..08b7f45 100644
+index 5762280..46b22fc 100644
 --- a/drivers/Makefile
 +++ b/drivers/Makefile
 @@ -189,3 +189,4 @@ obj-$(CONFIG_GNSS)		+= gnss/
@@ -23,17 +23,17 @@ index 5762280..08b7f45 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..5c579ee
+index 0000000..3d06dbd
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0xade0f1e
++#define GIT_REV 0xf568088
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
-index 0000000..7280ee2
+index 0000000..8e51d12
 --- /dev/null
 +++ b/drivers/hw_def.h
-@@ -0,0 +1,527 @@
+@@ -0,0 +1,531 @@
 +// Author: Xianjun jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -121,10 +121,14 @@ index 0000000..7280ee2
 +    || openwifi_platform_has_token(fpga_model, root_compatible, OW_PLATFORM_TOKEN_ZC706);
 +}
 +
++/* All platforms need DATA_SEL=DMA written to the DAC channels.
++ * Previously returned false for Cheshire, which left the axi_ad9361 DAC
++ * DATA_SEL mux at its reset default (DDS tone mode) — TX IQ data from
++ * DMA was gated out and frames never reached the air. */
 +static inline bool openwifi_platform_uses_direct_dac_mode(const char *fpga_model,
 +  const char *root_compatible)
 +{
-+  return !openwifi_platform_is_cheshire(fpga_model, root_compatible);
++  return true;
 +}
 +
 +//we choose 3822=(5160+2484)/2 for calibration to avoid treating 5140 as 2.4GHz
@@ -1537,10 +1541,10 @@ index 0000000..79bd212
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/sdr.c b/drivers/sdr.c
 new file mode 100644
-index 0000000..98124dd
+index 0000000..f4aa717
 --- /dev/null
 +++ b/drivers/sdr.c
-@@ -0,0 +1,1633 @@
+@@ -0,0 +1,1643 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu, Jetmir Haxhibeqiri, Pablo Avila Campos
 +// SPDX-FileCopyrightText: 2022 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -1902,8 +1906,16 @@ index 0000000..98124dd
 +static void openwifi_classify_platform_from_model(struct openwifi_priv *priv, const char *fpga_model,
 +  const char *root_compatible)
 +{
-+  priv->hardware_type = openwifi_platform_is_cheshire(fpga_model, root_compatible) ? UNKNOWN_HARDWARE
-+    : (openwifi_platform_is_zynqmp_class(fpga_model, root_compatible) ? ZYNQMP_AD9361 : ZYNQ_AD9361);
++  /* Cheshire runs on ZCU104 (ZynqMP UltraScale+) with AD9361 — classify as
++   * ZYNQMP_AD9361, not UNKNOWN_HARDWARE. The DTS uses "eth,cheshire" tokens
++   * which don't match openwifi_platform_is_zynqmp_class() checks, so we map
++   * it explicitly here. */
++  if (openwifi_platform_is_cheshire(fpga_model, root_compatible))
++    priv->hardware_type = ZYNQMP_AD9361;
++  else if (openwifi_platform_is_zynqmp_class(fpga_model, root_compatible))
++    priv->hardware_type = ZYNQMP_AD9361;
++  else
++    priv->hardware_type = ZYNQ_AD9361;
 +  priv->fpga_type = openwifi_platform_is_large_fpga(fpga_model, root_compatible) ? LARGE_FPGA : SMALL_FPGA;
 +}
 +
@@ -2926,18 +2938,20 @@ index 0000000..98124dd
 +  }
 +  printk("%s ad9361_spi_to_phy ad9361-phy: %s\n", sdr_compatible_str, priv->ad9361_phy->spi->modalias);
 +
-+  /* Configure DAC source path: direct register write or cf_axi_dds driver. */
++  /* Configure DAC source path: write DATA_SEL=DMA to all DAC channels.
++   * Address differs: Zynq has separate DDS IP at 0x99024000, Theshire has
++   * DAC sub-block within axi_ad9361 at 0x40084000. */
 +#ifdef ENABLE_DIRECT_DAC_MODE
 +  if (use_direct_dac_mode) {
-+    err = openwifi_set_dac_dma_mode_direct();
++    phys_addr_t dac_phys_base = openwifi_platform_is_cheshire(fpga_model, root_compatible)
++        ? OW_DAC_DDS_BASE_THESHIRE
++        : OW_DAC_DDS_BASE_ZYNQ;
++    err = openwifi_set_dac_dma_mode_direct(dac_phys_base);
 +    if (err < 0) {
 +      goto err_free_dev;
 +    }
-+    printk("%s openwifi_dev_probe: DAC set to DMA mode (direct register write)\n",
-+      sdr_compatible_str);
-+  } else {
-+    printk("%s openwifi_dev_probe: skip direct DAC register setup on Cheshire platform\n",
-+      sdr_compatible_str);
++    printk("%s openwifi_dev_probe: DAC set to DMA mode at %pa (direct register write)\n",
++      sdr_compatible_str, &dac_phys_base);
 +  }
 +#else
 +  /* Find cf_axi_dds platform device for DAC channel data source selection. */
@@ -3176,10 +3190,10 @@ index 0000000..98124dd
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..b6e0540
+index 0000000..5f9eb94
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,889 @@
+@@ -0,0 +1,893 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3370,7 +3384,11 @@ index 0000000..b6e0540
 +#define OW_MAC_ADDR_PREFIX3                 0x33U
 +#define OW_MAC_ADDR_PREFIX4                 0x22U
 +
-+#define OW_DAC_DDS_BASE                     0x99024000U
++/* DAC DDS register base addresses — platform-specific because Zynq has a
++ * separate cf-ad9361-dds-core-lpc IP at 0x99024000, while Theshire maps the
++ * DAC sub-block at axi_ad9361 base (0x40080000) + DAC offset (0x4000). */
++#define OW_DAC_DDS_BASE_ZYNQ               0x99024000U
++#define OW_DAC_DDS_BASE_THESHIRE            0x40084000U
 +#define OW_DAC_DDS_REG_SIZE                 0x1000U
 +#define OW_DAC_REG_CHAN_CNTRL_7_OFFSET      0x0418U
 +#define OW_DAC_CHAN_STRIDE                  0x40U
@@ -7539,10 +7557,10 @@ index 0000000..84b3b35
 +}
 diff --git a/drivers/sdr_utils.c b/drivers/sdr_utils.c
 new file mode 100644
-index 0000000..e4b52fc
+index 0000000..e3f209e
 --- /dev/null
 +++ b/drivers/sdr_utils.c
-@@ -0,0 +1,604 @@
+@@ -0,0 +1,606 @@
 +/**
 + * @file sdr_utils.c
 + * @brief Shared SDR helper routines (RF control, RSSI utilities, antenna, misc).
@@ -7577,16 +7595,18 @@ index 0000000..e4b52fc
 +/**
 + * @brief Force ADI DAC core data path to DMA mode via direct register writes.
 + *
++ * @param dac_phys_base Physical base address of the DAC DDS register block.
 + * @return 0 on success, -ENOMEM on ioremap failure.
 + */
-+static int openwifi_set_dac_dma_mode_direct(void)
++static int openwifi_set_dac_dma_mode_direct(phys_addr_t dac_phys_base)
 +{
 +  void __iomem *dac_base;
 +  int channel_idx;
 +
-+  dac_base = ioremap(OW_DAC_DDS_BASE, OW_DAC_DDS_REG_SIZE);
++  dac_base = ioremap(dac_phys_base, OW_DAC_DDS_REG_SIZE);
 +  if (!dac_base) {
-+    printk(KERN_ERR "%s openwifi_set_dac_dma_mode_direct: ioremap failed\n", sdr_compatible_str);
++    printk(KERN_ERR "%s openwifi_set_dac_dma_mode_direct: ioremap failed for %pa\n",
++      sdr_compatible_str, &dac_phys_base);
 +    return -ENOMEM;
 +  }
 +
