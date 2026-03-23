@@ -1,3 +1,13 @@
+#==============================================================================
+# Buildroot 64-bit defconfig — CVA6 (Cheshire) ZCU104 + OpenWiFi
+#
+# Packages are grouped by function. To disable optional packages, comment out
+# or set =n. Rebuild with: make -C cva6-sdk clean && make -C cva6-sdk
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# Architecture and toolchain
+#------------------------------------------------------------------------------
 BR2_riscv=y
 BR2_riscv_custom=y
 BR2_RISCV_ISA_CUSTOM_RVM=y
@@ -7,6 +17,10 @@ BR2_RISCV_ISA_CUSTOM_RVC=y
 BR2_CCACHE=y
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_5_10=y
+
+#------------------------------------------------------------------------------
+# Rootfs and kernel
+#------------------------------------------------------------------------------
 BR2_ROOTFS_OVERLAY="../rootfs"
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_GIT=y
@@ -17,41 +31,72 @@ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
 BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="../configs/linux64_openwifi_defconfig"
 BR2_LINUX_KERNEL_VMLINUX=y
 
-# This two flags enable devtmpfs, means that I dont create the device nodes
-# statically, but I create it runtime depending on which driver detects which
-# hardware.  This is more flexible and modern.
+# devtmpfs: create device nodes at runtime based on detected hardware
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
 BR2_ROOTFS_DEVICE_TABLE=""
 
 BR2_PACKAGE_BUSYBOX_CONFIG="../configs/busybox64.config"
-BR2_PACKAGE_ALSA_UTILS=y
-BR2_PACKAGE_ALSA_UTILS_APLAY=y
-BR2_PACKAGE_MPG123=y
-BR2_PACKAGE_DHRYSTONE=y
-BR2_PACKAGE_MEMSTAT=y
-BR2_PACKAGE_RAMSPEED=y
-BR2_PACKAGE_NFS_UTILS=y
-BR2_PACKAGE_LIBNFS=y
-BR2_PACKAGE_ETHTOOL=y
-# BR2_PACKAGE_IFUPDOWN_SCRIPTS is not set
-BR2_PACKAGE_IPERF3=y
-BR2_PACKAGE_IPROUTE2=y
+BR2_TARGET_ROOTFS_CPIO_GZIP=y
+BR2_TARGET_ROOTFS_INITRAMFS=y
+# BR2_TARGET_ROOTFS_TAR is not set
+
+#------------------------------------------------------------------------------
+# WiFi — client mode (no Ethernet on Theshire, no AP mode)
+#------------------------------------------------------------------------------
 BR2_PACKAGE_IW=y
 BR2_PACKAGE_WIRELESS_REGDB=y
-# External OpenWiFi userspace tools (require OPENWIFI_SRC set in source_toolchains.sh).
-BR2_PACKAGE_OPENWIFI_SDRCTL=y
-BR2_PACKAGE_OPENWIFI_SIDE_CH_CTL=y
-BR2_PACKAGE_TCPDUMP=y
 BR2_PACKAGE_WPA_SUPPLICANT=y
 BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
 BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
 BR2_PACKAGE_WPA_SUPPLICANT_PASSPHRASE=y
-BR2_TARGET_ROOTFS_CPIO_GZIP=y
-BR2_TARGET_ROOTFS_INITRAMFS=y
-# BR2_TARGET_ROOTFS_TAR is not set
+
+# OpenWiFi userspace tools (require OPENWIFI_SRC set in source_toolchains.sh)
+BR2_PACKAGE_OPENWIFI_SDRCTL=y
+BR2_PACKAGE_OPENWIFI_SIDE_CH_CTL=y
+
+#------------------------------------------------------------------------------
+# Remote access — SSH over WiFi (Dropbear: ~110 KB, includes scp)
+#------------------------------------------------------------------------------
+BR2_PACKAGE_DROPBEAR=y
+BR2_PACKAGE_HAVEGED=y
+
+#------------------------------------------------------------------------------
+# Network diagnostics
+#------------------------------------------------------------------------------
+BR2_PACKAGE_ETHTOOL=y
+# BR2_PACKAGE_IFUPDOWN_SCRIPTS is not set
+BR2_PACKAGE_IPERF3=y
+BR2_PACKAGE_IPROUTE2=y
+BR2_PACKAGE_TCPDUMP=y
+BR2_PACKAGE_NETCAT=y
+
+#------------------------------------------------------------------------------
+# File transfer
+#------------------------------------------------------------------------------
+BR2_PACKAGE_NFS_UTILS=y
+BR2_PACKAGE_LIBNFS=y
+BR2_PACKAGE_LRZSZ=y
+
+#------------------------------------------------------------------------------
+# Hardware debugging
+#------------------------------------------------------------------------------
+BR2_PACKAGE_SPIDEV_TEST=y
+BR2_PACKAGE_STRACE=y
+
+#------------------------------------------------------------------------------
+# Benchmarks
+#------------------------------------------------------------------------------
+BR2_PACKAGE_DHRYSTONE=y
+BR2_PACKAGE_MEMSTAT=y
+BR2_PACKAGE_RAMSPEED=y
 BR2_PACKAGE_EASYPERF=y
 BR2_PACKAGE_MATMUL=y
 BR2_PACKAGE_COREMARK=y
-BR2_PACKAGE_NETCAT=y
-BR2_PACKAGE_LRZSZ=y
-BR2_PACKAGE_SPIDEV_TEST=y
+
+#------------------------------------------------------------------------------
+# Convenience (optional — comment out to save image size)
+#------------------------------------------------------------------------------
+BR2_PACKAGE_ALSA_UTILS=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_MPG123=y
+BR2_PACKAGE_NANO=y
