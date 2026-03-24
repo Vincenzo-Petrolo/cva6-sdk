@@ -1,13 +1,20 @@
 #==============================================================================
 # Buildroot 64-bit defconfig — CVA6 (Cheshire) ZCU104 + OpenWiFi
 #
-# Packages are grouped by function. To disable optional packages, comment out
-# or set =n. Rebuild with: make -C cva6-sdk clean && make -C cva6-sdk
+# Structure:
+#   - Architecture/toolchain and rootfs/kernel sections are build infrastructure
+#   - Required packages: core platform operation (WiFi, SSH, basic networking)
+#   - Optional packages: improve usability, can be commented out to save image
+#
+# Topics may appear in both Required and Optional (e.g., Network has core
+# connectivity tools in Required and diagnostic tools in Optional).
+#
+# Rebuild with: make chs-linux-rebuild (from repo root)
 #==============================================================================
 
-#------------------------------------------------------------------------------
+#==============================================================================
 # Architecture and toolchain
-#------------------------------------------------------------------------------
+#==============================================================================
 BR2_riscv=y
 BR2_riscv_custom=y
 BR2_RISCV_ISA_CUSTOM_RVM=y
@@ -18,9 +25,9 @@ BR2_CCACHE=y
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_5_10=y
 
-#------------------------------------------------------------------------------
+#==============================================================================
 # Rootfs and kernel
-#------------------------------------------------------------------------------
+#==============================================================================
 BR2_ROOTFS_OVERLAY="../rootfs"
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_GIT=y
@@ -39,6 +46,10 @@ BR2_PACKAGE_BUSYBOX_CONFIG="../configs/busybox64.config"
 BR2_TARGET_ROOTFS_CPIO_GZIP=y
 BR2_TARGET_ROOTFS_INITRAMFS=y
 # BR2_TARGET_ROOTFS_TAR is not set
+
+#==============================================================================
+# Required packages — core platform operation
+#==============================================================================
 
 #------------------------------------------------------------------------------
 # WiFi — client mode (no Ethernet on Theshire, no AP mode)
@@ -61,27 +72,54 @@ BR2_PACKAGE_DROPBEAR=y
 BR2_PACKAGE_HAVEGED=y
 
 #------------------------------------------------------------------------------
-# Network diagnostics
+# Network — core connectivity
 #------------------------------------------------------------------------------
-BR2_PACKAGE_ETHTOOL=y
 # BR2_PACKAGE_IFUPDOWN_SCRIPTS is not set
-BR2_PACKAGE_IPERF3=y
 BR2_PACKAGE_IPROUTE2=y
-BR2_PACKAGE_TCPDUMP=y
 BR2_PACKAGE_NETCAT=y
 
 #------------------------------------------------------------------------------
-# File transfer
+# File transfer — serial fallback (works before WiFi is up)
 #------------------------------------------------------------------------------
-BR2_PACKAGE_NFS_UTILS=y
-BR2_PACKAGE_LIBNFS=y
 BR2_PACKAGE_LRZSZ=y
 
 #------------------------------------------------------------------------------
-# Hardware debugging
+# Hardware debugging — core
+#------------------------------------------------------------------------------
+BR2_PACKAGE_STRACE=y
+
+#==============================================================================
+# Optional packages — comment out to save image size
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# Network — diagnostics and testing
+#------------------------------------------------------------------------------
+BR2_PACKAGE_ETHTOOL=y
+BR2_PACKAGE_IPERF3=y
+BR2_PACKAGE_TCPDUMP=y
+
+#------------------------------------------------------------------------------
+# File transfer — network (requires WiFi)
+#------------------------------------------------------------------------------
+BR2_PACKAGE_NFS_UTILS=y
+BR2_PACKAGE_LIBNFS=y
+BR2_PACKAGE_SOCAT=y
+
+#------------------------------------------------------------------------------
+# Hardware debugging — specialized
 #------------------------------------------------------------------------------
 BR2_PACKAGE_SPIDEV_TEST=y
-BR2_PACKAGE_STRACE=y
+
+#------------------------------------------------------------------------------
+# System monitoring
+#------------------------------------------------------------------------------
+BR2_PACKAGE_HTOP=y
+
+#------------------------------------------------------------------------------
+# Terminal multiplexer — detach/reattach sessions over SSH
+#------------------------------------------------------------------------------
+BR2_PACKAGE_TMUX=y
 
 #------------------------------------------------------------------------------
 # Benchmarks
@@ -94,7 +132,7 @@ BR2_PACKAGE_MATMUL=y
 BR2_PACKAGE_COREMARK=y
 
 #------------------------------------------------------------------------------
-# Convenience (optional — comment out to save image size)
+# Convenience
 #------------------------------------------------------------------------------
 BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_APLAY=y
