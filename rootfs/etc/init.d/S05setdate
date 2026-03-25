@@ -1,0 +1,30 @@
+#!/bin/sh
+#
+# S05setdate  Set system clock from build timestamp.
+#
+# Cheshire/CVA6 has no hardware RTC — the kernel boots at epoch 0.
+# htop (and other tools) require a non-zero btime in /proc/stat,
+# which needs a non-zero wall clock at boot.  This script sets
+# the date to the image build time as a reasonable approximation.
+
+start() {
+  if [ -f /etc/build_timestamp ]; then
+    date -s "$(cat /etc/build_timestamp)" >/dev/null 2>&1
+    echo "System clock set to build time: $(cat /etc/build_timestamp)"
+  fi
+  return 0
+}
+
+case "$1" in
+  start)
+    start
+    ;;
+  stop|restart|reload)
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
+
+exit $?
