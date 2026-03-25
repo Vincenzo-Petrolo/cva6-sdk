@@ -1,0 +1,177 @@
+#!/bin/sh
+#******************************************************************************
+# openwifi_ap — AP mode helper for OpenWiFi on CVA6 Linux target
+#
+# Starts/stops hostapd + udhcpd for WiFi AP mode.
+#
+# KNOWN LIMITATION: TX ACK timing issue prevents successful client
+# association. Beacons broadcast (AP visible to phones/laptops) but
+# auth/assoc fails. See docs/todo/todo_openwifi_tx_auth_failure.md.
+#
+# Supported commands:
+#   start  [iface]    — start AP mode
+#   stop   [iface]    — stop AP mode
+#   status [iface]    — show AP status
+#******************************************************************************
+
+set -eu
+
+#==============================================================================
+# Constants
+#==============================================================================
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+readonly RUNTIME_DIR="/run/openwifi"
+readonly HOSTAPD_CONF="/etc/openwifi/hostapd-openwifi.conf"
+readonly UDHCPD_CONF="/etc/openwifi/udhcpd-openwifi.conf"
+readonly AP_SUBNET="192.168.44.1/24"
+
+#==============================================================================
+# Helpers
+#==============================================================================
+
+usage() {
+  echo "Usage:"
+  echo "  openwifi_ap start [iface]"
+  echo "  openwifi_ap stop [iface]"
+  echo "  openwifi_ap status [iface]"
+}
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+warn_tx_ack() {
+  echo ""
+  echo "WARNING: TX ACK timing issue is NOT yet fixed."
+  echo "  Beacons broadcast — AP is VISIBLE to nearby devices."
+  echo "  Client association will FAIL (auth timeout)."
+  echo "  See: docs/todo/todo_openwifi_tx_auth_failure.md"
+  echo ""
+}
+
+#==============================================================================
+# Commands
+#==============================================================================
+
+do_start() {
+  local iface="${1:-wlan0}"
+
+  need_cmd hostapd
+  need_cmd udhcpd
+  need_cmd iw
+  need_cmd ip
+
+  mkdir -p "$RUNTIME_DIR"
+
+  # Kill any running wpa_supplicant (nl80211 interface ownership conflict)
+  if [ -f "$RUNTIME_DIR/wpa_supplicant-${iface}.pid" ]; then
+    pid=$(cat "$RUNTIME_DIR/wpa_supplicant-${iface}.pid")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Stopping wpa_supplicant (pid $pid) to release interface..."
+      kill "$pid"
+      sleep 1
+    fi
+  fi
+
+  # Ensure regulatory domain is set (S80openwifi sets this at boot,
+  # but check as a safety net)
+  if ! iw reg get | grep -q '^country CH:'; then
+    iw reg set CH
+  fi
+
+  # Create lease directory
+  mkdir -p /var/lib/misc
+
+  # Configure interface
+  ip link set "$iface" up
+  ip addr add "$AP_SUBNET" dev "$iface" 2>/dev/null || true
+
+  # Start hostapd
+  echo "Starting hostapd..."
+  hostapd -B -P "$RUNTIME_DIR/hostapd-${iface}.pid" "$HOSTAPD_CONF"
+
+  # Start udhcpd
+  echo "Starting udhcpd..."
+  udhcpd "$UDHCPD_CONF"
+
+  warn_tx_ack
+  echo "AP started on $iface (SSID: theshire, channel: 36)"
+}
+
+do_stop() {
+  local iface="${1:-wlan0}"
+
+  # Stop hostapd
+  if [ -f "$RUNTIME_DIR/hostapd-${iface}.pid" ]; then
+    pid=$(cat "$RUNTIME_DIR/hostapd-${iface}.pid")
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid"
+      echo "hostapd stopped"
+    fi
+  fi
+
+  # Stop udhcpd (no PID file by default — kill by name)
+  if command -v killall >/dev/null 2>&1; then
+    killall udhcpd 2>/dev/null || true
+  fi
+
+  # Clean up interface
+  ip addr flush dev "$iface" 2>/dev/null || true
+  ip link set "$iface" down 2>/dev/null || true
+
+  echo "AP stopped on $iface"
+}
+
+do_status() {
+  local iface="${1:-wlan0}"
+
+  echo "=== Interface ==="
+  ip addr show "$iface" 2>/dev/null || echo "$iface not found"
+
+  echo ""
+  echo "=== hostapd ==="
+  if [ -f "$RUNTIME_DIR/hostapd-${iface}.pid" ]; then
+    pid=$(cat "$RUNTIME_DIR/hostapd-${iface}.pid")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Running (pid $pid)"
+    else
+      echo "Not running (stale PID file)"
+    fi
+  else
+    echo "Not running"
+  fi
+
+  echo ""
+  echo "=== udhcpd leases ==="
+  if [ -f /var/lib/misc/udhcpd.leases ]; then
+    cat /var/lib/misc/udhcpd.leases
+  else
+    echo "No lease file"
+  fi
+}
+
+#==============================================================================
+# Main
+#==============================================================================
+
+if [ $# -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+cmd="$1"
+shift
+
+case "$cmd" in
+  start)  do_start "$@" ;;
+  stop)   do_stop "$@" ;;
+  status) do_status "$@" ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage
+    exit 1
+    ;;
+esac

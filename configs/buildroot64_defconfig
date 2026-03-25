@@ -43,6 +43,7 @@ BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
 BR2_ROOTFS_DEVICE_TABLE=""
 
 BR2_PACKAGE_BUSYBOX_CONFIG="../configs/busybox64.config"
+BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
 BR2_TARGET_ROOTFS_CPIO_GZIP=y
 BR2_TARGET_ROOTFS_INITRAMFS=y
 # BR2_TARGET_ROOTFS_TAR is not set
@@ -52,7 +53,7 @@ BR2_TARGET_ROOTFS_INITRAMFS=y
 #==============================================================================
 
 #------------------------------------------------------------------------------
-# WiFi — client mode (no Ethernet on Theshire, no AP mode)
+# WiFi — client + AP mode (no Ethernet on Theshire)
 #------------------------------------------------------------------------------
 BR2_PACKAGE_IW=y
 BR2_PACKAGE_WIRELESS_REGDB=y
@@ -64,6 +65,7 @@ BR2_PACKAGE_WPA_SUPPLICANT_PASSPHRASE=y
 # OpenWiFi userspace tools (require OPENWIFI_SRC set in source_toolchains.sh)
 BR2_PACKAGE_OPENWIFI_SDRCTL=y
 BR2_PACKAGE_OPENWIFI_SIDE_CH_CTL=y
+BR2_PACKAGE_OPENWIFI_INJECT_80211=y
 
 #------------------------------------------------------------------------------
 # Remote access — SSH over WiFi (Dropbear: ~110 KB, includes scp)
@@ -91,6 +93,18 @@ BR2_PACKAGE_STRACE=y
 #==============================================================================
 # Optional packages — comment out to save image size
 #==============================================================================
+
+#------------------------------------------------------------------------------
+# Shell — full GNU bash (for upstream OpenWiFi scripts with bash-isms)
+#------------------------------------------------------------------------------
+BR2_PACKAGE_BASH=y
+
+#------------------------------------------------------------------------------
+# WiFi — AP mode testing (beacons visible; client assoc blocked by TX ACK timing)
+#------------------------------------------------------------------------------
+BR2_PACKAGE_HOSTAPD=y
+BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
+BR2_PACKAGE_LIBPCAP=y
 
 #------------------------------------------------------------------------------
 # Network — diagnostics and testing
@@ -130,6 +144,16 @@ BR2_PACKAGE_RAMSPEED=y
 BR2_PACKAGE_EASYPERF=y
 BR2_PACKAGE_MATMUL=y
 BR2_PACKAGE_COREMARK=y
+
+#------------------------------------------------------------------------------
+# System utilities — small, useful for hardware debugging
+#------------------------------------------------------------------------------
+BR2_PACKAGE_I2C_TOOLS=y
+BR2_PACKAGE_LSOF=y
+BR2_PACKAGE_LESS=y
+BR2_PACKAGE_FILE=y
+BR2_PACKAGE_TREE=y
+BR2_PACKAGE_BC=y
 
 #------------------------------------------------------------------------------
 # Convenience
