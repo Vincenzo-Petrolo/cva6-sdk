@@ -15,6 +15,14 @@
 # SPI bus inits before AXI platform bus, so this works. If sdr0 is missing,
 # check dmesg for AD9361 probe errors first.
 
+# ADI DMA FLAG_LAST: REQUIRED for cyclic S2MM RX.
+# Without FLAG_LAST, FPGA TLAST triggers abort/consume cascade in ADI DMAC
+# data_mover.v → ~63 bogus completions per packet → IRQ storm on slow CPU.
+# On CVA6 (100MHz), this causes rx_dma_cb_full_count overflow and potential
+# RX pipeline stalls. Validated on openwifi ARM (commit 68475b3, 2026-03-26).
+# SOURCE OF TRUTH: openwifi/CLAUDE.md NOTE(openwifi-adi-dma-flag-last)
+echo Y > /sys/module/dma_axi_dmac/parameters/ow_rx_force_flag_last 2>/dev/null || true
+
 # Find AD9361 IIO device
 IIO=""
 for d in /sys/bus/iio/devices/iio:device*; do

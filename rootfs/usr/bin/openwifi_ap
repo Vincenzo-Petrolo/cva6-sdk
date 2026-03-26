@@ -4,9 +4,9 @@
 #
 # Starts/stops hostapd + udhcpd for WiFi AP mode.
 #
-# KNOWN LIMITATION: TX ACK timing issue prevents successful client
-# association. Beacons broadcast (AP visible to phones/laptops) but
-# auth/assoc fails. See docs/todo/todo_openwifi_tx_auth_failure.md.
+# KNOWN LIMITATION: TX/data reliability is still degraded. Beacons broadcast and
+# client association can complete, but DHCP/data traffic remains unreliable due
+# to high data-frame ACK failure rate. See docs/todo/todo_openwifi_tx_auth_failure.md.
 #
 # Supported commands:
 #   start  [iface]    — start AP mode
@@ -47,7 +47,7 @@ warn_tx_ack() {
   echo ""
   echo "WARNING: TX ACK timing issue is NOT yet fixed."
   echo "  Beacons broadcast — AP is VISIBLE to nearby devices."
-  echo "  Client association will FAIL (auth timeout)."
+  echo "  Client association may succeed, but DHCP/data traffic remains unreliable."
   echo "  See: docs/todo/todo_openwifi_tx_auth_failure.md"
   echo ""
 }
@@ -82,8 +82,9 @@ do_start() {
     iw reg set CH
   fi
 
-  # Create lease directory
+  # Create lease directory and file (busybox udhcpd requires the lease file to exist)
   mkdir -p /var/lib/misc
+  touch /var/lib/misc/udhcpd.leases
 
   # Configure interface
   ip link set "$iface" up
