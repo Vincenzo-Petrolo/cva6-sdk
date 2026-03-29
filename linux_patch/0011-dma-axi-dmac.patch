@@ -58,13 +58,17 @@ index 5161b73c..cfc0f327 100644
  
 +/*
 + * OpenWiFi RX experiment knob:
-+ * - true: force FLAG_LAST for cyclic S2MM submits (legacy OpenWiFi behavior)
-+ * - false: rely on descriptor-length completion only (Try-1 behavior)
++ * - true: force FLAG_LAST for cyclic S2MM submits (REQUIRED for OpenWiFi RX).
++ *         Without FLAG_LAST, FPGA TLAST triggers abort/consume cascade in ADI
++ *         DMAC data_mover.v -> request_generator.v -> response_manager.v,
++ *         producing ~63 bogus completions per packet -> IRQ storm.
++ *         Root cause confirmed on ARM (openwifi commit 68475b3, 2026-03-26).
++ * - false: rely on descriptor-length completion only (broken for OpenWiFi RX).
 + */
-+static bool ow_rx_force_flag_last = false;
++static bool ow_rx_force_flag_last = true;
 +module_param_named(ow_rx_force_flag_last, ow_rx_force_flag_last, bool, 0644);
 +MODULE_PARM_DESC(ow_rx_force_flag_last,
-+		 "Force FLAG_LAST on cyclic S2MM submits (default: false)");
++		 "Force FLAG_LAST on cyclic S2MM submits (default: true, REQUIRED)");
 +
 +static bool axi_dmac_desc_has_partial_len(struct axi_dmac_desc *desc);
 +

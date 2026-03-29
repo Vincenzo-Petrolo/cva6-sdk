@@ -12,7 +12,7 @@ Current OpenWiFi-related overlay additions:
 - `root/openwifi/user_space/monitor_ch.sh`: theshire-specific override (iw instead of iwconfig)
 - `root/openwifi/user_space/nic_back_to_normal.sh`: theshire-specific override (iw instead of iwconfig)
 - `root/openwifi/arbitrary_iq_gen/`: IQ data files for raw TX testing
-- `etc/openwifi/hostapd-openwifi.conf`: hostapd config for AP mode (5 GHz ch 36, WPA2-PSK)
+- `etc/openwifi/hostapd-openwifi.conf`: hostapd config for AP mode (5 GHz ch 36, open AP — WPA2-PSK commented out for bring-up)
 - `etc/openwifi/udhcpd-openwifi.conf`: DHCP server config for AP mode
 - `etc/init.d/S80openwifi`: boot-time WiFi init (regulatory domain, FIR filters)
 

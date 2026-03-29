@@ -111,14 +111,14 @@ Uses `0010-openwifi.manifest.tsv` as the import manifest. `git_rev.h` and `pre_d
 
 ADI axi-dmac DMA driver with OpenWiFi cyclic S2MM fixes.
 
-**`ow_rx_force_flag_last` = REQUIRED (set to `true` at boot via S80openwifi).**
-The compiled-in default is `false`, but `S80openwifi` writes `Y` to
-`/sys/module/dma_axi_dmac/parameters/ow_rx_force_flag_last` before RF init.
+**`ow_rx_force_flag_last` = REQUIRED (compiled-in default: `true`).**
+`S80openwifi` also writes `Y` to the sysfs parameter as a safety net.
 Without FLAG_LAST, FPGA TLAST triggers abort/consume cascade in ADI DMAC
 data_mover.v → ~63 bogus completions per packet → IRQ storm. On CVA6
-(100 MHz), this manifests as `rx_dma_cb_full_count` overflow rather than
-the full system hang seen on ARM. Root cause confirmed on openwifi ZCU104
-(commit `68475b3`, 2026-03-26).
+(100 MHz), this manifests as elevated `rx_dma_cb_full_count` (DMA callback
+stall counter) rather than the full system hang seen on ARM. Root cause
+confirmed on openwifi ARM (commit `68475b3`, 2026-03-26); suspected on CVA6
+RISC-V — pending on-board verification.
 
 Canonical source: `openwifi/patches/adi-linux-64/files/drivers/dma/dma-axi-dmac.c`
 (manually maintained, no regen script).

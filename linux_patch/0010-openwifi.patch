@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..3d06dbd
+index 0000000..4b49654
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0xf568088
++#define GIT_REV 0x68475b3
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..8e51d12
@@ -4729,10 +4729,10 @@ index 0000000..a0acf60
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..e41aa58
+index 0000000..bf9cae4
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1108 @@
+@@ -0,0 +1,1125 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -5632,6 +5632,17 @@ index 0000000..e41aa58
 +  /* TODO(openwifi-rx-2phase-phase-a): keep lock scope here limited to
 +   * slot-ready scan + claim bookkeeping only. */
 +  spin_lock(&priv->lock);
++#ifdef CONFIG_RISCV
++  /* CVA6-specific: FENCE.T (Custom0 opcode 0x0B) invalidates entire L1 D-cache.
++   * DMA writes via ext_mst bypass the write-through L1; without invalidation,
++   * CPU reads stale pkt_exist flags. CVA6 has no Zicbom (cbo.inval illegal)
++   * and DcacheFlushOnFence=0, so FENCE.T is the only SW cache invalidation.
++   * Also flushes I-cache as side effect (no D-only variant on CVA6).
++   * One per IRQ entry, NOT per slot — 32KB flush is too heavy for inner loop.
++   * On ARM, dma_alloc_coherent returns uncached memory — not needed.
++   * WARNING: CVA6-only instruction — illegal on other RISC-V cores. */
++  asm volatile(".insn r 0x0B, 0, 0, x0, x0, x0" ::: "memory");
++#endif
 +  for (idx_slot = 0; idx_slot < NUM_RX_BD; idx_slot++) {
 +    rx_slot_idx_for_log = idx_slot;
 +    pdata_tmp = priv->rx_cyclic_buf + idx_slot * RX_BD_BUF_SIZE;
@@ -5643,6 +5654,10 @@ index 0000000..e41aa58
 +  /* TODO(openwifi-rx-2phase-phase-a): keep lock scope here limited to
 +   * slot-ready scan + claim bookkeeping only. */
 +  spin_lock(&priv->lock);
++#ifdef CONFIG_RISCV
++  /* CVA6 FENCE.T — see comment in ENABLE_RX_SCAN_ALL_SLOTS path above. */
++  asm volatile(".insn r 0x0B, 0, 0, x0, x0, x0" ::: "memory");
++#endif
 +  for (;;) {
 +    rx_slot_idx_for_log = priv->rx_target_buf_idx_old;
 +    pdata_tmp = priv->rx_cyclic_buf + priv->rx_target_buf_idx_old * RX_BD_BUF_SIZE;
@@ -5656,7 +5671,9 @@ index 0000000..e41aa58
 +   * and ieee80211_rx_irqsafe handoff outside priv->lock. */
 +  /* Ensure subsequent metadata reads see data written by the DMA producer
 +   * after it set the pkt-exist marker. Buffer is dma_alloc_coherent
-+   * (uncached on ARM), so this is for CPU read-ordering, not cache coherency. */
++   * (uncached on ARM via pgprot_dmacoherent; CACHED on RISC-V 5.10 due to
++   * missing arch_dma_set_uncached — L1 invalidated by FENCE.T above).
++   * This dma_rmb() is for CPU read-ordering after the FENCE.T. */
 +  dma_rmb();
 +
 +  tsft_low = ow_rx_read_u32(pdata_tmp, OW_RX_META_OFF_TSFT_LOW_BYTES);
