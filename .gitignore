@@ -6,6 +6,7 @@ rootfs/usr/bin/spi_ad9361_ping
 rootfs/usr/bin/sdrctl
 rootfs/usr/bin/side_ch_ctl
 rootfs/etc/build_timestamp
+ai_ops/
 
 riscv-gnu-toolchain/build
 riscv-fesvr/build
