@@ -4,7 +4,7 @@
 # inject_80211.sh — 802.11n packet injection sweep
 #
 # Usage: ./inject_80211.sh
-#   Sweeps MCS 0..7 x frame sizes 50..1450 bytes on mon0.
+#   Sweeps MCS 0..7 x frame sizes 50..1450 bytes on wlan0 (in monitor mode).
 #
 # Author: Michael Mehari
 # Author: Andreas T. Kristensen (ZCU104 port)
@@ -18,7 +18,7 @@ set -euo pipefail
 HW_MODE='n'
 COUNT=100
 DELAY_US=1000                       # inter-packet delay (microseconds)
-IF="mon0"
+IF="wlan0"
 
 # 802.11n packet sweep parameters
 MCS_INDEX_MAX=7                     # MCS 0..7 (HT single-stream rates)
