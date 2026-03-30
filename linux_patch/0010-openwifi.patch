@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..4b49654
+index 0000000..cbc583b
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x68475b3
++#define GIT_REV 0xb85f6df
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..8e51d12
@@ -4729,10 +4729,10 @@ index 0000000..a0acf60
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..bf9cae4
+index 0000000..f9275e4
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1125 @@
+@@ -0,0 +1,1201 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -5633,15 +5633,12 @@ index 0000000..bf9cae4
 +   * slot-ready scan + claim bookkeeping only. */
 +  spin_lock(&priv->lock);
 +#ifdef CONFIG_RISCV
-+  /* CVA6-specific: FENCE.T (Custom0 opcode 0x0B) invalidates entire L1 D-cache.
-+   * DMA writes via ext_mst bypass the write-through L1; without invalidation,
-+   * CPU reads stale pkt_exist flags. CVA6 has no Zicbom (cbo.inval illegal)
-+   * and DcacheFlushOnFence=0, so FENCE.T is the only SW cache invalidation.
-+   * Also flushes I-cache as side effect (no D-only variant on CVA6).
-+   * One per IRQ entry, NOT per slot — 32KB flush is too heavy for inner loop.
-+   * On ARM, dma_alloc_coherent returns uncached memory — not needed.
-+   * WARNING: CVA6-only instruction — illegal on other RISC-V cores. */
-+  asm volatile(".insn r 0x0B, 0, 0, x0, x0, x0" ::: "memory");
++  /* TODO(openwifi-rx-coherency): Re-enable if PMA NC region is not deployed.
++   * CVA6 FENCE.T invalidates entire L1 D-cache. With PMA NC region, DMA
++   * buffers bypass L1 — FENCE.T not needed. See dma_rmb() comment below.
++   *
++   * asm volatile(".insn r 0x0B, 0, 0, x0, x0, x0" ::: "memory");
++   */
 +#endif
 +  for (idx_slot = 0; idx_slot < NUM_RX_BD; idx_slot++) {
 +    rx_slot_idx_for_log = idx_slot;
@@ -5655,8 +5652,10 @@ index 0000000..bf9cae4
 +   * slot-ready scan + claim bookkeeping only. */
 +  spin_lock(&priv->lock);
 +#ifdef CONFIG_RISCV
-+  /* CVA6 FENCE.T — see comment in ENABLE_RX_SCAN_ALL_SLOTS path above. */
-+  asm volatile(".insn r 0x0B, 0, 0, x0, x0, x0" ::: "memory");
++  /* CVA6 FENCE.T — commented out, see ENABLE_RX_SCAN_ALL_SLOTS path above.
++   *
++   * asm volatile(".insn r 0x0B, 0, 0, x0, x0, x0" ::: "memory");
++   */
 +#endif
 +  for (;;) {
 +    rx_slot_idx_for_log = priv->rx_target_buf_idx_old;
@@ -5670,10 +5669,87 @@ index 0000000..bf9cae4
 +  /* TODO(openwifi-rx-2phase-phase-b): move metadata parse, skb allocation,
 +   * and ieee80211_rx_irqsafe handoff outside priv->lock. */
 +  /* Ensure subsequent metadata reads see data written by the DMA producer
-+   * after it set the pkt-exist marker. Buffer is dma_alloc_coherent
-+   * (uncached on ARM via pgprot_dmacoherent; CACHED on RISC-V 5.10 due to
-+   * missing arch_dma_set_uncached — L1 invalidated by FENCE.T above).
-+   * This dma_rmb() is for CPU read-ordering after the FENCE.T. */
++   * after it set the pkt-exist marker.
++   *
++   * DMA-to-CPU coherency differs across the four build variants. The HW
++   * interconnect path determines whether DMA writes are visible to CPU
++   * caches, and the SW mapping determines whether CPU reads bypass cache.
++   *
++   * Variant 1-3: ARM64/ZynqMP (BD + ADI DMA, BD + Xilinx DMA, RTL + ADI DMA)
++   *   HW: DMA masters write via PS HP ports (non-coherent, bypass CCI-400):
++   *       RX DMA -> axi_interconnect_2 (BD) or PULP axi_mux (RTL) -> HP0
++   *       TX DMA -> axi_interconnect_0 (BD) or PULP axi_mux (RTL) -> HP3
++   *       (see openwifi-hw: flows/bd/05_connections.tcl lines 75-76,
++   *        flows/rtl/common/setup_vivado_project_common.tcl lines 998-1001,
++   *        soc_top_zynq.sv lines 740-810)
++   *   SW: dma_alloc_coherent() maps buffer non-cacheable via pgprot_dmacoherent
++   *       (= MT_NORMAL_NC on ARM64) because the DMA device is non-coherent
++   *       (dma-coherent is disabled in DTS, CacheCoherentDest=0 in RTL).
++   *       CPU reads go to DDR, never L1/L2. No cache invalidation needed.
++   *       dma_rmb() is the sole ordering mechanism — prevents the CPU from
++   *       speculatively reordering reads past the DMA completion.
++   *
++   * Variant 4: RISC-V/CVA6 (RTL Theshire + ADI DMA)
++   *   HW: DMA masters are wire-merged in theshire_wrapper.sv into Cheshire
++   *       ext_mst[0], then route through the Cheshire xbar -> LLC ->
++   *       dram_wrapper_xilinx -> PS HPC0. Note: HPC0 goes through CCI-400
++   *       which snoops the ARM A53 cluster, but CCI-400 has no visibility
++   *       into CVA6's L1 D-cache. CVA6 CPU shares the same LLC -> HPC0
++   *       backend path for DDR access.
++   *       (see openwifi-hw: flows/rtl/theshire/archived/.../ps_ddr_bridge.tcl,
++   *        docs/specs/spec_dma_subsystem.md lines 62-66,
++   *        rtl/theshire/theshire_wrapper.sv lines 560-673)
++   *   SW: dma_alloc_coherent() on RISC-V in kernels before 5.19 does NOT
++   *       set non-cacheable mapping (ARCH_HAS_DMA_SET_UNCACHED not selected
++   *       by arch/riscv). Buffer is CACHED in CVA6's write-through L1.
++   *       DMA writes update the LLC, but CVA6's L1 D-cache is not expected
++   *       to be snooped/invalidated by the LLC on ext_mst writes (no L1
++   *       coherency protocol between Cheshire LLC and CVA6 wt_dcache).
++   *       CPU reads hit stale L1 entries. FENCE.T above invalidates entire
++   *       L1 D-cache (32KB). dma_rmb() then orders reads after invalidation.
++   *
++   * Summary: ARM variants need only dma_rmb() (SW non-cacheable mapping
++   * handles coherency). CVA6 with PMA NC region needs only dma_rmb()
++   * (DMA buffers bypass L1 via PMA). Without PMA NC, CVA6 would need
++   * FENCE.T + dma_rmb() (L1 is cached, LLC does not snoop L1 on DMA writes).
++   *
++   * Coherency is non-coherent at THREE levels on ARM (all must agree):
++   *   1. HW port: HP0/HP3 bypass CCI-400 (no cache snoop)
++   *   2. DTS: dma-coherent commented out (system.dts:2154) → kernel's
++   *      dev_is_dma_coherent() returns false → pgprot_dmacoherent mapping
++   *   3. RTL: CacheCoherentDest=0 in dma_subsystem_adi.sv:595 → DMA
++   *      engine generates non-cacheable ARCACHE on AXI bus
++   * Changing any one without the others creates a coherency mismatch.
++   *
++   * Why FENCE.T is the only current option on CVA6:
++   *   - FENCE.T is a CVA6 custom security instruction (Custom0, 0x0B) that
++   *     flushes D-cache + I-cache + drains AXI + resets uarch (branch
++   *     predictor etc). It is overkill for DMA cache invalidation but is
++   *     the ONLY instruction on this CVA6 that can invalidate L1 D-cache.
++   *   - DcacheFlushOnFence=1 IS a viable fallback: it triggers a FULL L1
++   *     D-cache invalidation on standard FENCE (clears valid bits on ALL
++   *     lines including clean ones, not just dirty writeback). Tradeoff:
++   *     every FENCE in the kernel (spinlocks, barriers) also flushes 32KB
++   *     L1. PMA NC region is preferred (zero runtime overhead).
++   *     (cheshire_pkg.sv:786, wt_dcache_missunit.sv)
++   *   - Zicbom cbo.inval: not implemented in CVA6 decoder (decoder.sv:
++   *     452-466 decodes funct3=010 as illegal). HPDCache CMO ports exist
++   *     as stubs (cva6.sv:1513-1536 FIXME). Would need decoder + pipeline
++   *     + cache wiring in RTL, plus kernel 5.19+ (Zicbom merged upstream).
++   *   - Kernel DMA API is broken on RISC-V 5.15: dev_is_dma_coherent()
++   *     hardcoded true (dma-map-ops.h:249-261, none of ARCH_HAS_SYNC_DMA
++   *     symbols selected). dma_alloc_coherent returns normal cached ptr.
++   *
++   * IMPLEMENTED: PMA NC region at top of DDR (cheshire_pkg.sv DmaNcSize).
++   *   CVA6 PMA is a cacheable-address whitelist — unlisted addresses bypass L1.
++   *   Ref: https://docs.openhwgroup.org/projects/cva6-user-manual/01_cva6_user/PMA.html
++   *   CachedRegionLength shrunk by 4 MiB, NrCachedRegionRules stays at 3.
++   *   DTS reserved-memory node binds DMA devices to NC pool via
++   *   of_reserved_mem_device_init() in dma-axi-dmac.c.
++   *   See docs/todo/todo_dma_cache_coherency.md for full investigation.
++   *   Long-term: Zicbom in CVA6 + kernel 5.19+ for standard RISC-V
++   *   non-coherent DMA (arch/riscv/mm/dma-noncoherent.c with cbo.inval).
++   *   See also: theshire docs/specs/spec_dma_subsystem.md. */
 +  dma_rmb();
 +
 +  tsft_low = ow_rx_read_u32(pdata_tmp, OW_RX_META_OFF_TSFT_LOW_BYTES);
@@ -8876,10 +8952,10 @@ index 0000000..23ea11e
 +}
 diff --git a/drivers/side_ch/side_ch.c b/drivers/side_ch/side_ch.c
 new file mode 100644
-index 0000000..e529e68
+index 0000000..15520d0
 --- /dev/null
 +++ b/drivers/side_ch/side_ch.c
-@@ -0,0 +1,694 @@
+@@ -0,0 +1,709 @@
 +/*
 + * openwifi side channel driver
 + * Author: Xianjun Jiao
@@ -8925,6 +9001,8 @@ index 0000000..e529e68
 +struct dma_chan *chan_to_pl = NULL;
 +struct dma_chan *chan_to_ps = NULL;
 +u8 *side_info_buf = NULL;
++dma_addr_t side_info_buf_dma_addr;
++struct device *side_info_dma_dev;  /* stored for dma_free_coherent in remove */
 +dma_cookie_t chan_to_ps_cookie;
 +const int max_side_info_buf_size = MAX_NUM_DMA_SYMBOL*8;
 +
@@ -9137,7 +9215,7 @@ index 0000000..e529e68
 +
 +		if (!chan_to_ps_d || !chan_to_pl_d) {
 +			printk("%s dma_loopback_test WARNING !chan_to_ps_d || !chan_to_pl_d\n", side_ch_compatible_str);
-+			goto err_dst_buf_with_unmap;
++			goto err_dma_submit;
 +		}
 +
 +		init_completion(&chan_to_pl_cmp);
@@ -9152,7 +9230,7 @@ index 0000000..e529e68
 +
 +		if (dma_submit_error(chan_to_pl_cookie) ||	dma_submit_error(chan_to_ps_cookie)) {
 +			printk("%s dma_loopback_test WARNING dma_submit_error\n", side_ch_compatible_str);
-+			goto err_dst_buf_with_unmap;
++			goto err_dma_submit;
 +		}
 +
 +		dma_async_issue_pending(chan_to_pl);
@@ -9163,20 +9241,20 @@ index 0000000..e529e68
 +		status = dma_async_is_tx_complete(chan_to_pl, chan_to_pl_cookie, NULL, NULL);
 +		if (chan_to_pl_tmo == 0) {
 +			printk("%s dma_loopback_test chan_to_pl_tmo == 0\n", side_ch_compatible_str);
-+			goto err_dst_buf_with_unmap;
++			goto err_dma_submit;
 +		} else if (status != DMA_COMPLETE) {
 +			printk("%s dma_loopback_test chan_to_pl status != DMA_COMPLETE\n", side_ch_compatible_str);
-+			goto err_dst_buf_with_unmap;
++			goto err_dma_submit;
 +		}
 +
 +		chan_to_ps_tmo = wait_for_completion_timeout(&chan_to_ps_cmp, chan_to_ps_tmo);
 +		status = dma_async_is_tx_complete(chan_to_ps, chan_to_ps_cookie, NULL, NULL);
 +		if (chan_to_ps_tmo == 0) {
 +			printk("%s dma_loopback_test chan_to_ps_tmo == 0\n", side_ch_compatible_str);
-+			goto err_dst_buf_with_unmap;
++			goto err_dma_submit;
 +		} else if (status != DMA_COMPLETE) {
 +			printk("%s dma_loopback_test chan_to_ps status != DMA_COMPLETE\n", side_ch_compatible_str);
-+			goto err_dst_buf_with_unmap;
++			goto err_dma_submit;
 +		}
 +
 +		dma_unmap_single(chan_to_pl_dev->dev, src_buf_dma, test_buf_size, DMA_MEM_TO_DEV);
@@ -9198,7 +9276,7 @@ index 0000000..e529e68
 +	printk("%s dma_loopback_test err %d\n", side_ch_compatible_str, err);
 +	return(err);
 +
-+err_dst_buf_with_unmap:
++err_dma_submit:
 +	dma_unmap_single(chan_to_ps_dev->dev, dst_buf_dma, test_buf_size, DMA_DEV_TO_MEM);
 +	
 +err_dst_buf_dma_mapping:
@@ -9219,9 +9297,12 @@ index 0000000..e529e68
 +#endif
 +
 +static int init_side_channel(void) {
-+	side_info_buf = kmalloc(max_side_info_buf_size, GFP_KERNEL);
-+	if (!side_info_buf)
++	side_info_dma_dev = chan_to_ps->device->dev;
++	side_info_buf = dma_alloc_coherent(side_info_dma_dev, max_side_info_buf_size,
++	                                    &side_info_buf_dma_addr, GFP_KERNEL);
++	if (!side_info_buf) {
 +		return(-1);
++	}
 +
 +	return(0);
 +}
@@ -9232,7 +9313,6 @@ index 0000000..e529e68
 +	enum dma_status status;
 +	enum dma_ctrl_flags flags = DMA_CTRL_ACK | DMA_PREP_INTERRUPT;
 +	int num_dma_symbol, num_dma_symbol_per_trans, side_info_buf_size;
-+	dma_addr_t side_info_buf_dma;
 +	struct dma_device *chan_to_ps_dev = chan_to_ps->device;
 +	struct completion chan_to_ps_cmp;
 +	struct dma_async_tx_descriptor *chan_to_ps_d = NULL;
@@ -9264,20 +9344,23 @@ index 0000000..e529e68
 +		return(-2);
 +
 +	side_info_buf_size = num_dma_symbol*8;
-+	side_info_buf_dma = dma_map_single(chan_to_ps_dev->dev, side_info_buf, side_info_buf_size, DMA_DEV_TO_MEM);
-+	if (dma_mapping_error(chan_to_ps_dev->dev, side_info_buf_dma)) {
-+		printk("%s get_side_info WARNING chan_to_ps_dev DMA mapping error\n", side_ch_compatible_str);
-+		return(-3);
++	if (side_info_buf_size > max_side_info_buf_size) {
++		printk("%s get_side_info: size %d exceeds max %d\n",
++		       side_ch_compatible_str, side_info_buf_size, max_side_info_buf_size);
++		return(-EINVAL);
 +	}
 +
++	/* side_info_buf already allocated from NC pool via dma_alloc_coherent.
++	 * Use the pre-mapped DMA address directly — no dma_map_single needed.
++	 * Transfer size varies per call but buffer is allocated at max size. */
 +	sg_init_table(chan_to_ps_sg, 1);
-+	sg_dma_address(&chan_to_ps_sg[0]) = side_info_buf_dma;
++	sg_dma_address(&chan_to_ps_sg[0]) = side_info_buf_dma_addr;
 +	sg_dma_len(&chan_to_ps_sg[0]) = side_info_buf_size;
 +
 +	chan_to_ps_d = chan_to_ps_dev->device_prep_slave_sg(chan_to_ps, chan_to_ps_sg, 1, DMA_DEV_TO_MEM, flags, NULL);
 +	if (!chan_to_ps_d) {
 +		printk("%s get_side_info WARNING !chan_to_ps_d\n", side_ch_compatible_str);
-+		goto err_dst_buf_with_unmap;
++		goto err_dma_submit;
 +	}
 +
 +	init_completion(&chan_to_ps_cmp);
@@ -9287,7 +9370,7 @@ index 0000000..e529e68
 +	chan_to_ps_cookie = chan_to_ps_d->tx_submit(chan_to_ps_d);
 +	if (dma_submit_error(chan_to_ps_cookie)) {
 +		printk("%s get_side_info WARNING dma_submit_error\n", side_ch_compatible_str);
-+		goto err_dst_buf_with_unmap;
++		goto err_dma_submit;
 +	}
 +
 +	SIDE_CH_REG_NUM_DMA_SYMBOL_write(num_dma_symbol); //dma from fpga will start automatically
@@ -9298,17 +9381,15 @@ index 0000000..e529e68
 +	status = dma_async_is_tx_complete(chan_to_ps, chan_to_ps_cookie, NULL, NULL);
 +	if (chan_to_ps_tmo == 0) {
 +		printk("%s get_side_info WARNING chan_to_ps_tmo == 0\n", side_ch_compatible_str);
-+		goto err_dst_buf_with_unmap;
++		goto err_dma_submit;
 +	} else if (status != DMA_COMPLETE) {
 +		printk("%s get_side_info WARNING chan_to_ps status != DMA_COMPLETE\n", side_ch_compatible_str);
-+		goto err_dst_buf_with_unmap;
++		goto err_dma_submit;
 +	}
 +
-+	dma_unmap_single(chan_to_ps_dev->dev, side_info_buf_dma, side_info_buf_size, DMA_DEV_TO_MEM);
 +	return(side_info_buf_size);
 +
-+err_dst_buf_with_unmap:
-+	dma_unmap_single(chan_to_ps_dev->dev, side_info_buf_dma, side_info_buf_size, DMA_DEV_TO_MEM);
++err_dma_submit:
 +	return(-100);
 +}
 +
@@ -9548,11 +9629,21 @@ index 0000000..e529e68
 +		 * Terminating side_ch's channel does NOT affect sdr.ko's channels.
 +		 * The old Xilinx DMA concern no longer applies. */
 +		dmaengine_terminate_all(chan_to_ps);
-+		dma_release_channel(chan_to_ps);
++		dmaengine_synchronize(chan_to_ps);
 +	}
 +
-+	if (side_info_buf != NULL)
-+		kfree(side_info_buf);
++	/* Free coherent buffer AFTER dmaengine_synchronize (ensures in-flight
++	 * DMA and callbacks are fully drained) but BEFORE dma_release_channel. */
++	if (side_info_buf != NULL) {
++		dma_free_coherent(side_info_dma_dev, max_side_info_buf_size,
++		                  side_info_buf, side_info_buf_dma_addr);
++		side_info_buf = NULL;
++	}
++
++	if (chan_to_ps != NULL) {
++		dma_release_channel(chan_to_ps);
++		chan_to_ps = NULL;
++	}
 +	
 +	printk("%s dev_remove: base_addr 0x%p\n", side_ch_compatible_str, base_addr);
 +	printk("%s dev_remove: succeed!\n", side_ch_compatible_str);
