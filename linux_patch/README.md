@@ -10,7 +10,10 @@ For the OpenWiFi and AD9361 patch space, the maintenance goal is to minimize loc
 - `0010-openwifi.patch`: OpenWiFi driver import (sdr, tx_intf, rx_intf, xpu, etc.). Regenerated via `util/regen_openwifi_patch.sh`.
 - `0011-dma-axi-dmac.patch`: ADI axi-dmac DMA driver with cyclic S2MM fixes for OpenWiFi RX + Kconfig RISCV + `of_reserved_mem_device_init` for CVA6 PMA NC DMA pool. Merged from former 0012 (Kconfig RISCV). Regenerated via `util/regen_dma_patch.sh`.
 - `0012-gpio-mmio-opentitan.patch`: GPIO MMIO driver for OpenTitan. (Renumbered from 0013.)
-- All 3 openwifi-sourced patches have regen scripts. `util/regen_all_patches.sh` regenerates all of them.
+- `0013-of-reserved-mem-debug.patch`: Downgrade `of_reserved_mem` assignment log from `dev_info` to `dev_dbg`.
+- `0014-dma-coherent-memremap-wb.patch`: Change `MEMREMAP_WC` to `MEMREMAP_WB` in `dma_init_coherent_memory()` for CVA6 PMA NC region where LLC provides coherency.
+- `0015-dma-axi-dmac-direct-theshire-nc-pool.patch`: Direct NC pool declaration via `dma_declare_coherent_memory()` on Theshire/CVA6, bypassing DTS `memory-region` phandle path. Gated by `of_machine_is_compatible("eth,cheshire-dev")`.
+- The 3 openwifi-sourced patches (0009-0011) have regen scripts. `util/regen_all_patches.sh` regenerates all of them. Patches 0013-0015 are hand-maintained Theshire-local patches.
 
 ## Canonical external sources
 
