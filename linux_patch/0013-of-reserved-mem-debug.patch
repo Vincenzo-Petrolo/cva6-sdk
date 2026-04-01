@@ -1,0 +1,13 @@
+diff --git a/drivers/of/of_reserved_mem.c b/drivers/of/of_reserved_mem.c
+index a7fbc5e3..ee8c2435 100644
+--- a/drivers/of/of_reserved_mem.c
++++ b/drivers/of/of_reserved_mem.c
+@@ -357,7 +357,7 @@ int of_reserved_mem_device_init_by_idx(struct device *dev,
+ 		list_add(&rd->list, &of_rmem_assigned_device_list);
+ 		mutex_unlock(&of_rmem_assigned_device_mutex);
+ 
+-		dev_info(dev, "assigned reserved memory node %s\n", rmem->name);
++		dev_dbg(dev, "assigned reserved memory node %s\n", rmem->name);
+ 	} else {
+ 		kfree(rd);
+ 	}

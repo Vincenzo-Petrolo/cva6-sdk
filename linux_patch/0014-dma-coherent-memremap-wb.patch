@@ -1,0 +1,13 @@
+diff --git a/kernel/dma/coherent.c b/kernel/dma/coherent.c
+index 5b5b6c7e..13d447c3 100644
+--- a/kernel/dma/coherent.c
++++ b/kernel/dma/coherent.c
+@@ -52,7 +52,7 @@ static int dma_init_coherent_memory(phys_addr_t phys_addr,
+ 		goto out;
+ 	}
+ 
+-	mem_base = memremap(phys_addr, size, MEMREMAP_WC);
++	mem_base = memremap(phys_addr, size, MEMREMAP_WB);
+ 	if (!mem_base) {
+ 		ret = -EINVAL;
+ 		goto out;

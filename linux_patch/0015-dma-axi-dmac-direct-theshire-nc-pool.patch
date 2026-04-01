@@ -1,0 +1,110 @@
+diff --git a/drivers/dma/dma-axi-dmac.c b/drivers/dma/dma-axi-dmac.c
+index b1a4096f..b1e12151 100644
+--- a/drivers/dma/dma-axi-dmac.c
++++ b/drivers/dma/dma-axi-dmac.c
+@@ -9,6 +9,7 @@
+ #include <linux/bitfield.h>
+ #include <linux/clk.h>
+ #include <linux/device.h>
++#include <linux/dma-map-ops.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/dmaengine.h>
+ #include <linux/err.h>
+@@ -182,6 +183,25 @@ MODULE_PARM_DESC(ow_rx_force_flag_last,
+ 		 "Force FLAG_LAST on cyclic S2MM submits (default: true, REQUIRED)");
+ 
+ static bool axi_dmac_desc_has_partial_len(struct axi_dmac_desc *desc);
++#ifdef CONFIG_RISCV
++/* Shared NC DMA pool for Theshire/CVA6 ADI DMAC instances.
++ * COUPLING: address 0xffc00000 = LlcOutRegionEnd - DmaNcSize in cheshire_pkg.sv.
++ * This bypasses the DT memory-region attach path while keeping allocations in
++ * the PMA non-cacheable window. */
++#define AXI_DMAC_THS_NC_POOL_PHYS  0xffc00000ULL
++#define AXI_DMAC_THS_NC_POOL_SIZE  0x00400000ULL
++static struct dma_coherent_mem *axi_dmac_ths_nc_pool;
++
++static bool axi_dmac_use_ths_nc_pool(void)
++{
++	return of_machine_is_compatible("eth,cheshire-dev");
++}
++#else
++static bool axi_dmac_use_ths_nc_pool(void)
++{
++	return false;
++}
++#endif
+ 
+ static struct axi_dmac *chan_to_axi_dmac(struct axi_dmac_chan *chan)
+ {
+@@ -1170,16 +1190,37 @@ static int axi_dmac_probe(struct platform_device *pdev)
+ 
+ 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
+ 
+-	/* Bind to reserved NC DMA pool if declared in DTS (CVA6 PMA NC region).
+-	 * On ARM/Zynq where DTS has no memory-region, returns -ENODEV → no-op.
+-	 * Any other error is fatal: without the NC pool, dma_alloc_coherent falls
+-	 * back to the normal allocator and FENCE.T is disabled → stale L1 reads. */
+-	ret = of_reserved_mem_device_init(&pdev->dev);
+-	if (ret == -ENODEV) {
+-		ret = 0;  /* No memory-region in DTS — expected on ARM/Zynq. */
+-	} else if (ret) {
+-		dev_err(&pdev->dev, "failed to init reserved memory: %d\n", ret);
+-		goto err_clk_disable;
++	/* Theshire/CVA6 experiment: declare the PMA NC DMA pool directly for the
++	 * DMAC device and bypass the DT memory-region attach path. */
++	if (axi_dmac_use_ths_nc_pool()) {
++		if (!axi_dmac_ths_nc_pool) {
++			ret = dma_declare_coherent_memory(&pdev->dev,
++				AXI_DMAC_THS_NC_POOL_PHYS,
++				AXI_DMAC_THS_NC_POOL_PHYS,
++				AXI_DMAC_THS_NC_POOL_SIZE);
++			if (ret) {
++				dev_err(&pdev->dev,
++					"failed to declare Theshire NC DMA pool: %d\n",
++					ret);
++				goto err_clk_disable;
++			}
++			axi_dmac_ths_nc_pool = pdev->dev.dma_mem;
++			dev_info(&pdev->dev,
++				"declared shared Theshire NC DMA pool @0x%llx size=0x%llx\n",
++				(unsigned long long)AXI_DMAC_THS_NC_POOL_PHYS,
++				(unsigned long long)AXI_DMAC_THS_NC_POOL_SIZE);
++		} else {
++			pdev->dev.dma_mem = axi_dmac_ths_nc_pool;
++			dev_info(&pdev->dev, "reusing shared Theshire NC DMA pool\n");
++		}
++	} else {
++		ret = of_reserved_mem_device_init(&pdev->dev);
++		if (ret == -ENODEV) {
++			ret = 0;  /* No memory-region in DTS - expected on ARM/Zynq. */
++		} else if (ret) {
++			dev_err(&pdev->dev, "failed to init reserved memory: %d\n", ret);
++			goto err_clk_disable;
++		}
+ 	}
+ 
+ 	dma_dev = &dmac->dma_dev;
+@@ -1267,7 +1308,10 @@ err_unregister_of:
+ err_unregister_device:
+ 	dma_async_device_unregister(&dmac->dma_dev);
+ err_reserved_mem:
+-	of_reserved_mem_device_release(&pdev->dev);
++	if (axi_dmac_use_ths_nc_pool())
++		pdev->dev.dma_mem = NULL;
++	else
++		of_reserved_mem_device_release(&pdev->dev);
+ err_clk_disable:
+ 	clk_disable_unprepare(dmac->clk);
+ 
+@@ -1282,7 +1326,10 @@ static int axi_dmac_remove(struct platform_device *pdev)
+ 	free_irq(dmac->irq, dmac);
+ 	tasklet_kill(&dmac->chan.vchan.task);
+ 	dma_async_device_unregister(&dmac->dma_dev);
+-	of_reserved_mem_device_release(&pdev->dev);
++	if (axi_dmac_use_ths_nc_pool())
++		pdev->dev.dma_mem = NULL;
++	else
++		of_reserved_mem_device_release(&pdev->dev);
+ 	clk_disable_unprepare(dmac->clk);
+ 
+ 	return 0;
