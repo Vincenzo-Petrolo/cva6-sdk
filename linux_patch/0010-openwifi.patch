@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..e409ea4
+index 0000000..d6b969c
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x50c059c
++#define GIT_REV 0x167c3a6
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..63e9de1
@@ -3197,10 +3197,10 @@ index 0000000..2d0104f
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..fa03583
+index 0000000..7ffbbad
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,950 @@
+@@ -0,0 +1,953 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3290,10 +3290,13 @@ index 0000000..fa03583
 +  void          *bounce_buf;
 +};
 +
-+/* Maximum TX completions drained per interrupt.
-+ * FPGA can report multiple completions per interrupt; each completion
-+ * may contain up to pkt_cnt packets. 8 keeps stack usage under ~224 bytes. */
-+#define OW_TX_DONE_BUDGET  8U
++/* Maximum TX completions deferred to Phase TX-B (unlocked) per interrupt.
++ * Completions beyond this budget fall back to inline processing under
++ * priv->lock, which calls ieee80211_tx_status_irqsafe under lock — safe
++ * on UP but a latent lock-ordering concern on SMP.  Keep this large enough
++ * that the overflow path is effectively unreachable.  16 uses ~384 bytes
++ * of stack (16 * sizeof(ow_tx_done_entry)), well within kernel 8 KB. */
++#define OW_TX_DONE_BUDGET  16U
 +
 +struct openwifi_vif {
 +  struct ieee80211_hw *dev;
@@ -4793,10 +4796,10 @@ index 0000000..a0acf60
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..d7fbba5
+index 0000000..8e5feb2
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1375 @@
+@@ -0,0 +1,1382 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -5875,6 +5878,7 @@ index 0000000..d7fbba5
 +   * after the hardirq returns + EOI, the PLIC sees the line deasserted and
 +   * does NOT re-fire.  No interrupt storm.  A NEW packet arrival generates
 +   * a new pulse which the PLIC latches normally.
++   * RTL ref: openwifi-hw rx_intf — rx_pkt_intr is a 1-cycle strobe.
 +   *
 +   * test_and_set_bit is atomic on both SMP and UP — safe for Zynq multi-core
 +   * and CVA6 single-core nested IRQ.
@@ -6137,6 +6141,8 @@ index 0000000..d7fbba5
 +      printk("%s openwifi_rx: WARNING dev_alloc_skb failed!\n", sdr_compatible_str);
 +    }
 +
++    /* NOTE: ampdu_ref advances even on alloc failure — pre-existing behavior.
++     * Harmless while AGGR_ENABLE=false (no AMPDU). */
 +    if (ht_aggr_last) {
 +      local_ampdu_ref++;
 +    }
@@ -6169,15 +6175,19 @@ index 0000000..d7fbba5
 +   * No additional packet cap is needed. */
 +  } while (n_claimed == OW_RX_PHASE_A_BUDGET);
 +
++  /* NOTE: clear_bit MUST follow spin_unlock_irqrestore from Phase RX-C so
++   * that all ring state updates are visible before the guard is released.
++   * On RISC-V, clear_bit uses amoand.w with release semantics; on ARM64,
++   * it provides full ordering.  Do not move this above the Phase C unlock. */
 +  clear_bit(0, &priv->rx_processing);
 +  return IRQ_HANDLED;
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..170b672
+index 0000000..a09a944
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,1818 @@
+@@ -0,0 +1,1826 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -7117,13 +7127,20 @@ index 0000000..170b672
 +          n_done++;
 +        } else {
 +          /* Budget exceeded — fall back to inline completion under lock.
-+           * NOTE: with AMPDU disabled (pkt_cnt=1 per completion) and budget=8,
-+           * this path requires 9+ back-to-back completions before CPU services
-+           * the interrupt — rare on CVA6 with per-packet udelay.  If this
-+           * becomes a problem, increase OW_TX_DONE_BUDGET or chunk-drain. */
-+          dma_unmap_single(priv->tx_chan->device->dev,
-+            ring->bds[ring->bd_rd_idx].dma_mapping_addr,
-+            ring->bds[ring->bd_rd_idx].dma_len_bytes, DMA_MEM_TO_DEV);
++           * NOTE: with AMPDU disabled (pkt_cnt=1 per completion) and budget=16,
++           * this path requires 17+ back-to-back completions before CPU services
++           * the interrupt — effectively unreachable on CVA6 with per-packet
++           * udelay.  On Zynq SMP, calling ieee80211_tx_status_irqsafe under
++           * priv->lock is a latent lock-ordering concern if mac80211 ever calls
++           * back into the driver while processing the status queue.
++           * TODO(openwifi-tx-budget-overflow-smp): if this path ever fires on
++           * SMP, expand tx_done[] to a resizable list or chunk-drain. */
++          if (ring->bds[ring->bd_rd_idx].dma_mapping_addr != 0
++              && ring->bds[ring->bd_rd_idx].dma_len_bytes != 0) {
++            dma_unmap_single(priv->tx_chan->device->dev,
++              ring->bds[ring->bd_rd_idx].dma_mapping_addr,
++              ring->bds[ring->bd_rd_idx].dma_len_bytes, DMA_MEM_TO_DEV);
++          }
 +          kfree(ring->bds[ring->bd_rd_idx].bounce_buf);
 +          ieee80211_tx_status_irqsafe(dev, skb);
 +        }
@@ -7867,9 +7884,10 @@ index 0000000..170b672
 +
 +  spin_lock_irqsave(&priv->lock, flags); /* ring stop mask is shared with TX interrupt path */
 +
-+  /* Recheck after DMA poll loop: the recovery worker may have set
-+   * tx_dma_terminating during the poll (up to tx_dma_wait_us window).
-+   * Without this, we could submit into a channel mid-terminate. */
++  /* Recheck after DMA poll + DMA map: the recovery worker may have set
++   * tx_dma_terminating during either the poll (up to tx_dma_wait_us window)
++   * or the dma_map_single cache flush.  Without this re-check we could
++   * submit into a channel mid-terminate. */
 +  if (READ_ONCE(priv->tx_dma_terminating)) {
 +    goto openwifi_tx_after_dma_mapping;
 +  }
