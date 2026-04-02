@@ -23,14 +23,14 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..a591475
+index 0000000..e409ea4
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0xf011cee
++#define GIT_REV 0x50c059c
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
-index 0000000..048bfd3
+index 0000000..63e9de1
 --- /dev/null
 +++ b/drivers/hw_def.h
 @@ -0,0 +1,525 @@
@@ -233,9 +233,9 @@ index 0000000..048bfd3
 +  void (*TX_INTF_REG_BB_GAIN_write)(u32 value);
 +  void (*TX_INTF_REG_ANT_SEL_write)(u32 value);
 +  void (*TX_INTF_REG_PHY_HDR_CONFIG_write)(u32 value);
-+  /* TX_INTF_REG_S_AXIS_FIFO_NO_ROOM, PKT_INFO1-4 are read-only RTL status
-+   * registers.  Write hooks were removed 2026-04-02 — zero callers remained
-+   * after the TX refactor (grep confirmed no callsites via tx_intf_api->). */
++  /* NOTE: TX_INTF_REG_S_AXIS_FIFO_NO_ROOM and PKT_INFO1-4 are read-only
++   * RTL status registers.  Do not add write hooks — there are no callers
++   * and the RTL decode ignores writes to these addresses. */
 +};
 +
 +// ------------------------------------rx interface----------------------------------------
@@ -4793,10 +4793,10 @@ index 0000000..a0acf60
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..21473e5
+index 0000000..d7fbba5
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1380 @@
+@@ -0,0 +1,1375 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -4821,11 +4821,6 @@ index 0000000..21473e5
 + *   FPGA slot-based design doesn't map directly to the NAPI poll model.
 + *   This is the highest-impact architectural change after the 3-phase refactor.
 + *
-+ * DONE(openwifi-rx-scan-rotate): Rotating start index for scan-all-slots mode.
-+ *   Phase RX-A now scans from priv->rx_scan_start_idx (advanced after each
-+ *   scan) instead of always starting at slot 0.  Fixes both efficiency (skip
-+ *   re-checking empty low-numbered slots) and fairness (prevents high-numbered
-+ *   slots from being starved under sustained load).
 + *
 + * TODO(openwifi-rx-skb-prealloc): Pre-allocated SKB pool for RX hot path.
 + *   dev_alloc_skb(len) per packet hits the SLUB allocator from hardirq context.
@@ -5021,7 +5016,7 @@ index 0000000..21473e5
 +   * No dma_mb() needed: all CPU reads from this slot preceded this function
 +   * call, and PMA NC (CVA6) / device mapping (ARM) means no stale-cache
 +   * concern for the read side.  dma_mb() would add a redundant device→CPU
-+   * barrier.  Resolved: 2026-04-02. */
++   * barrier. */
 +  dma_wmb();
 +  ow_rx_slot_flag_clear(slot_base);
 +}
@@ -6179,10 +6174,10 @@ index 0000000..21473e5
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..7bb5f99
+index 0000000..170b672
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,1831 @@
+@@ -0,0 +1,1818 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -6211,22 +6206,11 @@ index 0000000..7bb5f99
 + *   was never wired up.  Note: wait_for_completion is illegal from softirq
 + *   context where openwifi_tx runs — needs deferred submission model.
 + *
-+ * DONE(openwifi-tx-queue-wake-unlock): Moved ieee80211_wake_queue() calls
-+ *   outside priv->lock in the TX interrupt handler.  Wake decisions are
-+ *   snapshotted via ow_tx_ring_clear_stopped() under lock; actual
-+ *   ieee80211_wake_queue() calls happen in Phase TX-B via ow_tx_wake_from_mask().
-+ *   The combined ow_tx_ring_wake_all_stopped() helper is kept for non-hot-path
-+ *   call sites (recovery, reclaim, stall clear).
-+ *
 + * TODO(openwifi-tx-bounce-prealloc): Pre-allocate per-ring bounce buffer.
 + *   Currently kmalloc(GFP_ATOMIC) + memcpy on DMA-misaligned frames.  Pre-
 + *   allocate one bounce buffer per SW ring slot at openwifi_start, indexed by
 + *   bd_wr_idx mod NUM_TX_BD.  Eliminates GFP_ATOMIC from softirq TX path.
 + *
-+ * DONE(openwifi-tx-dma-map-unlock): Moved dma_map_single() before priv->lock
-+ *   in the TX submit path.  The cache flush (~10-50 us on non-coherent RISC-V
-+ *   for 1500B) no longer blocks the TX IRQ.  Error paths route through
-+ *   openwifi_tx_after_dma_mapping for proper unmap.
 + */
 +
 +//=============================================================================
@@ -7992,8 +7976,6 @@ index 0000000..7bb5f99
 +
 +openwifi_tx_after_dma_mapping:
 +  dma_unmap_single(priv->tx_chan->device->dev, dma_mapping_addr, num_dma_byte, DMA_MEM_TO_DEV);
-+
-+openwifi_tx_early_out_after_lock:
 +  spin_unlock_irqrestore(&priv->lock, flags);
 +
 +openwifi_tx_early_out_free_bounce:
@@ -11821,10 +11803,10 @@ index 0000000..b04b41a
 +};
 diff --git a/drivers/tx_intf/tx_intf.c b/drivers/tx_intf/tx_intf.c
 new file mode 100644
-index 0000000..5e09a59
+index 0000000..b6f83c7
 --- /dev/null
 +++ b/drivers/tx_intf/tx_intf.c
-@@ -0,0 +1,496 @@
+@@ -0,0 +1,493 @@
 +/*
 + * axi lite register access driver
 + * Author: Xianjun Jiao, Michael Mehari, Wei Liu
@@ -12026,9 +12008,6 @@ index 0000000..5e09a59
 +static inline void TX_INTF_REG_PHY_HDR_CONFIG_write(u32 value){
 +  reg_write(TX_INTF_REG_PHY_HDR_CONFIG_ADDR, value);
 +}
-+
-+/* TX_INTF_REG_S_AXIS_FIFO_NO_ROOM, PKT_INFO1-4 RO write stubs removed
-+ * 2026-04-02 — zero callers remained after TX refactor.  See hw_def.h. */
 +
 +static const struct of_device_id dev_of_ids[] = {
 +  { .compatible = "sdr,tx_intf", },

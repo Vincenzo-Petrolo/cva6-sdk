@@ -12,7 +12,7 @@ index 90284ff..c41d5d3 100644
  	select DMA_VIRTUAL_CHANNELS
  	select REGMAP_MMIO
 diff --git a/drivers/dma/dma-axi-dmac.c b/drivers/dma/dma-axi-dmac.c
-index 5161b73..14f753f 100644
+index 5161b73..596bcc7 100644
 --- a/drivers/dma/dma-axi-dmac.c
 +++ b/drivers/dma/dma-axi-dmac.c
 @@ -9,6 +9,7 @@
@@ -559,12 +559,12 @@ index 5161b73..14f753f 100644
  	dma_async_device_unregister(&dmac->dma_dev);
 +err_reserved_mem:
 +	if (axi_dmac_use_ths_nc_pool()) {
-+		if (atomic_dec_and_test(&axi_dmac_ths_nc_pool_users)) {
-+			dma_release_declared_memory(&pdev->dev);
-+			axi_dmac_ths_nc_pool = NULL;
-+		} else {
-+			pdev->dev.dma_mem = NULL;
-+		}
++		/* NOTE: do not call dma_release_declared_memory — it does not exist
++		 * in kernel 5.10.  The pool is shared and the driver is built-in,
++		 * so we just detach this device.  The pool memory persists until
++		 * reboot (acceptable for a built-in driver on an embedded SoC). */
++		pdev->dev.dma_mem = NULL;
++		atomic_dec(&axi_dmac_ths_nc_pool_users);
 +	} else {
 +		of_reserved_mem_device_release(&pdev->dev);
 +	}
@@ -576,12 +576,12 @@ index 5161b73..14f753f 100644
  	tasklet_kill(&dmac->chan.vchan.task);
  	dma_async_device_unregister(&dmac->dma_dev);
 +	if (axi_dmac_use_ths_nc_pool()) {
-+		if (atomic_dec_and_test(&axi_dmac_ths_nc_pool_users)) {
-+			dma_release_declared_memory(&pdev->dev);
-+			axi_dmac_ths_nc_pool = NULL;
-+		} else {
-+			pdev->dev.dma_mem = NULL;
-+		}
++		/* NOTE: do not call dma_release_declared_memory — it does not exist
++		 * in kernel 5.10.  The pool is shared and the driver is built-in,
++		 * so we just detach this device.  The pool memory persists until
++		 * reboot (acceptable for a built-in driver on an embedded SoC). */
++		pdev->dev.dma_mem = NULL;
++		atomic_dec(&axi_dmac_ths_nc_pool_users);
 +	} else {
 +		of_reserved_mem_device_release(&pdev->dev);
 +	}
