@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..d6b969c
+index 0000000..bab7583
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x167c3a6
++#define GIT_REV 0x34f7dcf
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..63e9de1
@@ -4796,10 +4796,10 @@ index 0000000..a0acf60
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..8e5feb2
+index 0000000..f5bfb23
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1382 @@
+@@ -0,0 +1,1394 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -4833,14 +4833,18 @@ index 0000000..8e5feb2
 + *   cheap (~30 cycles), so the gain may be modest.
 + *
 + * TODO(openwifi-rx-zicbom-dma): Implement Zicbom in CVA6 for per-cacheline DMA
-+ *   invalidation — eliminates NC memcpy bottleneck (~7K-30K cycles per 1500B).
++ *   invalidation — eliminates NC read overhead for 1500B memcpy.
 + *
-+ *   Current state: PMA NC region forces all DMA buffer reads to bypass L1 and
-+ *   go straight to DDR.  This is correct but slow — every byte of skb_put_data
-+ *   from the RX cyclic buffer is an uncached load.
++ *   Current state: PMA NC region forces all DMA buffer reads to bypass L1.
++ *   NC reads go through LLC (not DDR) — the LLC still caches this range
++ *   (cheshire_pkg.sv:688-690: "LLC bounds use full LlcOutRegion, unchanged").
++ *   DMA writes also go through LLC, so data is likely LLC-resident when the
++ *   CPU reads it.  Cost: ~94 LLC accesses × 5-20 cycles = ~470-1880 cycles
++ *   per 1500B packet (LLC hit), much better than DDR but still slower than L1.
 + *
 + *   Target: cached DMA buffers + cbo.inval per slot before Phase RX-B read.
-+ *   memcpy from cached buffer would be 10-50x faster (L1 hit after invalidate).
++ *   memcpy from L1-cached buffer would be ~2-5x faster (L1 hit after inval).
++ *   Gain depends on L1 line size — see cache line size note below.
 + *
 + *   Implementation roadmap (3 layers, all required):
 + *
@@ -4856,8 +4860,10 @@ index 0000000..8e5feb2
 + *      c. HPDCache/wt_dcache: implement CMO_INVAL handler — invalidate the
 + *         cache line matching the address operand (rs1).  For write-through
 + *         L1, invalidate = clear valid bit (no writeback needed).
-+ *      d. CSR: set cbo_block_size to L1 line size (typically 64B for CVA6
-+ *         wt_dcache, verify via CACHELINE_BYTES or equivalent param).
++ *      d. CSR: set cbo_block_size to L1 line size.  CVA6 wt_dcache has
++ *         DcacheLineWidth=128 bits = 16 bytes (cheshire_pkg.sv:797).
++ *         With 16B lines, 4096B slot = 256 cbo.inval instructions.
++ *         HPDCache uses 64B lines — if HPDCache is adopted, 64 cbo.inval.
 + *         Expose via riscv_cbom_block_size in DT or CSR enumerator.
 + *
 + *   2. Kernel (5.19+ or backport to 5.15):
@@ -4878,13 +4884,17 @@ index 0000000..8e5feb2
 + *      b. Phase RX-B: before reading slot metadata, call
 + *         dma_sync_single_for_cpu(dev, slot_dma_addr, RX_BD_BUF_SIZE,
 + *         DMA_FROM_DEVICE) — this issues cbo.inval for each cache line in the
-+ *         slot (RX_BD_BUF_SIZE/64 = 64 cbo.inval instructions for 4096B slot).
++ *         slot.  With wt_dcache 16B lines: 4096/16 = 256 cbo.inval per slot.
++ *         With HPDCache 64B lines: 4096/64 = 64 cbo.inval per slot.
 + *      c. Phase RX-C: after clearing pkt-exist flag, no sync needed — flag
 + *         clear is a write (cbo.clean or writeback handled by write-through).
 + *      d. dma_rmb() remains after sync (ordering, not coherency).
-+ *      e. Benchmark: 64 × cbo.inval (~1-5 cycles each on in-order CVA6,
-+ *         ~64-320 cycles total) vs current NC read penalty (~7K-30K cycles
-+ *         for full packet memcpy).  Net gain: ~20-100x for the memcpy itself.
++ *      e. Benchmark (wt_dcache 16B lines): 256 × cbo.inval (~1-5 cycles each,
++ *         ~256-1280 cycles total) vs current NC-through-LLC penalty (~470-1880
++ *         cycles for full 1500B memcpy at LLC latency).  Net gain with 16B
++ *         lines is marginal (~1-2x).  HPDCache with 64B lines (64 × cbo.inval
++ *         = ~64-320 cycles) gives a clearer win (~3-7x).  Zicbom is most
++ *         valuable when paired with HPDCache adoption.
 + *
 + *   Risk: CVA6 HPDCache CMO stubs may need non-trivial wiring.  Validate with
 + *   a standalone Zicbom test (cbo.inval loop + DMA write + read-back) before
@@ -5760,8 +5770,10 @@ index 0000000..8e5feb2
 + *
 + * Summary: ARM variants need only dma_rmb() (SW non-cacheable mapping
 + * handles coherency). CVA6 with PMA NC region needs only dma_rmb()
-+ * (DMA buffers bypass L1 via PMA). Without PMA NC, CVA6 would need
-+ * FENCE.T + dma_rmb() (L1 is cached, LLC does not snoop L1 on DMA writes).
++ * (DMA buffers bypass L1 via PMA; NC reads go through LLC, which is the
++ * coherency point for both DMA writes and CPU NC reads — see
++ * cheshire_pkg.sv:688-690). Without PMA NC, CVA6 would need FENCE.T +
++ * dma_rmb() (L1 is cached, LLC does not snoop L1 on DMA writes).
 + *
 + * Coherency is non-coherent at THREE levels on ARM (all must agree):
 + *   1. HW port: HP0/HP3 bypass CCI-400 (no cache snoop)
