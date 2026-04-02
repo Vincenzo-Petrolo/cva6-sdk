@@ -78,4 +78,10 @@ iw reg set CH 2>/dev/null || true
 # Suppress rx_irq console spam (messages still available in dmesg)
 echo 4 > /proc/sys/kernel/printk
 
+# Theshire sysfs tuning (100MHz CVA6 — reduces TX poll budget and RX fallback frequency)
+echo 100 > /sys/module/sdr/parameters/tx_dma_wait_us
+echo 2 > /sys/module/sdr/parameters/tx_dma_poll_step_us
+echo 16 > /sys/module/sdr/parameters/rx_callback_fallback_n_cb
+echo 200 > /sys/module/sdr/parameters/rx_callback_fallback_n_ms
+
 echo "OpenWiFi RF initialized"
