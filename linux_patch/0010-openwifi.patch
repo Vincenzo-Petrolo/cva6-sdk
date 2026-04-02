@@ -23,17 +23,17 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..d4f780b
+index 0000000..a591475
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x78dcb5e
++#define GIT_REV 0xf011cee
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
-index 0000000..8e51d12
+index 0000000..048bfd3
 --- /dev/null
 +++ b/drivers/hw_def.h
-@@ -0,0 +1,531 @@
+@@ -0,0 +1,525 @@
 +// Author: Xianjun jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -233,15 +233,9 @@ index 0000000..8e51d12
 +  void (*TX_INTF_REG_BB_GAIN_write)(u32 value);
 +  void (*TX_INTF_REG_ANT_SEL_write)(u32 value);
 +  void (*TX_INTF_REG_PHY_HDR_CONFIG_write)(u32 value);
-+  /* TODO(openwifi-tx-status-ro-api-cleanup): these status-register write hooks
-+   * map to read-only RTL registers in current TX_INTF AXI decode.
-+   * Keep warn-and-ignore behavior for compatibility now, then remove these
-+   * hooks from the public API once all callsites are cleaned up. */
-+  void (*TX_INTF_REG_S_AXIS_FIFO_NO_ROOM_write)(u32 value);
-+  void (*TX_INTF_REG_PKT_INFO1_write)(u32 value);
-+  void (*TX_INTF_REG_PKT_INFO2_write)(u32 value);
-+  void (*TX_INTF_REG_PKT_INFO3_write)(u32 value);
-+  void (*TX_INTF_REG_PKT_INFO4_write)(u32 value);
++  /* TX_INTF_REG_S_AXIS_FIFO_NO_ROOM, PKT_INFO1-4 are read-only RTL status
++   * registers.  Write hooks were removed 2026-04-02 — zero callers remained
++   * after the TX refactor (grep confirmed no callsites via tx_intf_api->). */
 +};
 +
 +// ------------------------------------rx interface----------------------------------------
@@ -1540,10 +1534,10 @@ index 0000000..79bd212
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/sdr.c b/drivers/sdr.c
 new file mode 100644
-index 0000000..f4aa717
+index 0000000..2d0104f
 --- /dev/null
 +++ b/drivers/sdr.c
-@@ -0,0 +1,1643 @@
+@@ -0,0 +1,1657 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu, Jetmir Haxhibeqiri, Pablo Avila Campos
 +// SPDX-FileCopyrightText: 2022 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -1909,12 +1903,13 @@ index 0000000..f4aa717
 +   * ZYNQMP_AD9361, not UNKNOWN_HARDWARE. The DTS uses "eth,cheshire" tokens
 +   * which don't match openwifi_platform_is_zynqmp_class() checks, so we map
 +   * it explicitly here. */
-+  if (openwifi_platform_is_cheshire(fpga_model, root_compatible))
++  if (openwifi_platform_is_cheshire(fpga_model, root_compatible)) {
 +    priv->hardware_type = ZYNQMP_AD9361;
-+  else if (openwifi_platform_is_zynqmp_class(fpga_model, root_compatible))
++  } else if (openwifi_platform_is_zynqmp_class(fpga_model, root_compatible)) {
 +    priv->hardware_type = ZYNQMP_AD9361;
-+  else
++  } else {
 +    priv->hardware_type = ZYNQ_AD9361;
++  }
 +  priv->fpga_type = openwifi_platform_is_large_fpga(fpga_model, root_compatible) ? LARGE_FPGA : SMALL_FPGA;
 +}
 +
@@ -2151,6 +2146,14 @@ index 0000000..f4aa717
 +  priv->rx_dma_watchdog_enabled = false;
 +  priv->rx_dma_wd_stall_count = 0;
 +  priv->rx_dma_wd_rearm_grace_ticks = 0;
++
++  /* Clear per-slot claim flags and re-entrancy guard from any previous
++   * stop/start cycle.  Without this, stale claims would permanently
++   * blacklist ring slots and a stale rx_processing flag would prevent
++   * all RX processing. */
++  clear_bit(0, &priv->rx_processing);
++  memset(priv->rx_slot_claimed, 0, sizeof(priv->rx_slot_claimed));
++  priv->rx_scan_start_idx = 0;
 +
 +  WRITE_ONCE(priv->tx_dma_stalled, false);
 +  WRITE_ONCE(priv->tx_dma_terminating, false);
@@ -2473,7 +2476,12 @@ index 0000000..f4aa717
 +   * in openwifi_tx_stall_recovery) and can re-arm between the first cancel
 +   * and the worker returning. This catches that narrow re-arm window. */
 +  cancel_delayed_work_sync(&priv->tx_stall_recovery_work);
-+  /* 2. Stop DMA engines (no more writes to buffers). */
++  /* 2. Stop DMA engines (no more writes to buffers).
++   * NOTE: dmaengine_terminate_sync → tasklet_kill waits for any running
++   * DMA callback (including openwifi_rx_interrupt Phase RX-B) to return
++   * before proceeding.  free_irq above already drained hardirq handlers.
++   * Together these guarantee no RX handler is running when we free memory
++   * at step 3 — no additional synchronization needed for Phase RX-B. */
 +  openwifi_disarm_rx_dma_callback(priv);
 +  term_tx_ret = openwifi_dma_terminate_sync_retry(priv->tx_chan, "openwifi_stop(tx)");
 +  term_rx_ret = openwifi_dma_terminate_sync_retry(priv->rx_chan, "openwifi_stop(rx)");
@@ -3189,10 +3197,10 @@ index 0000000..f4aa717
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..5f9eb94
+index 0000000..fa03583
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,893 @@
+@@ -0,0 +1,950 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3255,6 +3263,37 @@ index 0000000..5f9eb94
 +  // u32 num_dma_symbol_request;
 +  // u32 reserved;
 +};
++
++/**
++ * @brief Per-slot work entry for 3-phase RX processing (Phase RX-A → Phase RX-B handoff).
++ *
++ * Carries slot index, DMA flag snapshot, and ampdu_reference at claim time.
++ * Phase RX-C only reads slot_idx for slot release; AMPDU tracking uses
++ * local_ampdu_ref maintained in Phase RX-B.
++ */
++struct ow_rx_work_entry {
++  u8   slot_idx;       /* index into rx_cyclic_buf (0 .. NUM_RX_BD-1) */
++  u16  agc_flag;       /* raw agc_status_and_pkt_exist_flag at claim time */
++  u32  ampdu_ref;      /* priv->ampdu_reference snapshot for this slot */
++};
++
++/**
++ * @brief Per-packet TX completion entry for 2-phase TX processing.
++ *
++ * Phase TX-A (locked) snapshots completion info from the ring.
++ * Phase TX-B (unlocked) does dma_unmap + kfree + ieee80211_tx_status_irqsafe.
++ */
++struct ow_tx_done_entry {
++  struct sk_buff *skb;
++  dma_addr_t     dma_addr;
++  u32            dma_len_bytes;
++  void          *bounce_buf;
++};
++
++/* Maximum TX completions drained per interrupt.
++ * FPGA can report multiple completions per interrupt; each completion
++ * may contain up to pkt_cnt packets. 8 keeps stack usage under ~224 bytes. */
++#define OW_TX_DONE_BUDGET  8U
 +
 +struct openwifi_vif {
 +  struct ieee80211_hw *dev;
@@ -3488,6 +3527,14 @@ index 0000000..5f9eb94
 +#define OW_TX_BD_BUF_SIZE_BYTES              8192U
 +/* RX slot size (payload + metadata). 4096 bytes avoids large-frame truncation. */
 +#define OW_RX_BD_BUF_SIZE_BYTES              4096U
++
++/* Maximum slots claimed per Phase RX-A invocation in the 3-phase RX handler.
++ * Limits locked scan window. Sequential mode always claims at most 1. */
++#ifdef ENABLE_RX_SCAN_ALL_SLOTS
++#define OW_RX_PHASE_A_BUDGET                 8U
++#else
++#define OW_RX_PHASE_A_BUDGET                 1U
++#endif
 +#define OW_NUM_BIT_HW_QUEUE                  2U
 +
 +/* Legacy compatibility aliases. */
@@ -4014,6 +4061,24 @@ index 0000000..5f9eb94
 +
 +  u32 ampdu_reference;
 +  u8  rx_target_buf_idx_old;
++
++  /* Re-entrancy guard for openwifi_rx_interrupt (bit 0).
++   * Prevents a nested hardirq from entering Phase RX-B while the outer
++   * softirq is already in Phase RX-B — which would deliver newer slots
++   * before older ones (out-of-order delivery to mac80211).
++   * Uses test_and_set_bit/clear_bit for atomicity on both SMP and UP.
++   * Nested calls return IRQ_HANDLED immediately; the outer do-while loop
++   * drains remaining slots.  FPGA rx_pkt_intr is a pulse — no storm. */
++  unsigned long rx_processing;
++
++  /* Per-slot claim flag for 3-phase RX processing.
++   * Set to 1 under priv->lock in Phase RX-A; cleared to 0 under priv->lock
++   * in Phase RX-C.  Watchdog ring-clear skips claimed slots. */
++  u8  rx_slot_claimed[OW_NUM_RX_BD];
++  /* Rotating scan start for scan-all-slots mode.  Avoids always starting at
++   * slot 0, which can starve high-numbered slots under sustained load.
++   * Advanced in Phase RX-A to one past the last scanned position. */
++  u8  rx_scan_start_idx;
 +  bool tx_aggr_prev_valid;
 +  u32 tx_aggr_prev_addr1_low32;
 +  u16 tx_aggr_prev_addr1_high16;
@@ -4728,10 +4793,10 @@ index 0000000..a0acf60
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..a78bcc8
+index 0000000..21473e5
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1203 @@
+@@ -0,0 +1,1380 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -4742,6 +4807,109 @@ index 0000000..a78bcc8
 + * - RX DMA callback fallback policy:
 + *   run the full RX handler when IRQ49 stalls for N callbacks or T ms, and
 + *   also run it periodically (T ms cadence) even when IRQ49 is progressing.
++ */
++
++//=============================================================================
++// Deferred Performance Work (not blocking current commit)
++//=============================================================================
++/*
++ * TODO(openwifi-rx-napi): Convert RX processing from hardirq/callback to NAPI.
++ *   Currently dev_alloc_skb + NC memcpy + ieee80211_rx_irqsafe all run in
++ *   hardirq context.  NAPI would defer to softirq with IRQ coalescing, allow
++ *   napi_alloc_skb (per-CPU page fragments), and let the kernel balance RX vs
++ *   TX work via softirq scheduling.  Significant rework — the cyclic DMA +
++ *   FPGA slot-based design doesn't map directly to the NAPI poll model.
++ *   This is the highest-impact architectural change after the 3-phase refactor.
++ *
++ * DONE(openwifi-rx-scan-rotate): Rotating start index for scan-all-slots mode.
++ *   Phase RX-A now scans from priv->rx_scan_start_idx (advanced after each
++ *   scan) instead of always starting at slot 0.  Fixes both efficiency (skip
++ *   re-checking empty low-numbered slots) and fairness (prevents high-numbered
++ *   slots from being starved under sustained load).
++ *
++ * TODO(openwifi-rx-skb-prealloc): Pre-allocated SKB pool for RX hot path.
++ *   dev_alloc_skb(len) per packet hits the SLUB allocator from hardirq context.
++ *   A pre-allocated ring of 8-16 SKBs (allocated during init, recycled after
++ *   mac80211 consumes them) would eliminate allocation jitter.  Moderate effort
++ *   due to pool management and refill logic.  On SMP=n the SLUB fast path is
++ *   cheap (~30 cycles), so the gain may be modest.
++ *
++ * TODO(openwifi-rx-zicbom-dma): Implement Zicbom in CVA6 for per-cacheline DMA
++ *   invalidation — eliminates NC memcpy bottleneck (~7K-30K cycles per 1500B).
++ *
++ *   Current state: PMA NC region forces all DMA buffer reads to bypass L1 and
++ *   go straight to DDR.  This is correct but slow — every byte of skb_put_data
++ *   from the RX cyclic buffer is an uncached load.
++ *
++ *   Target: cached DMA buffers + cbo.inval per slot before Phase RX-B read.
++ *   memcpy from cached buffer would be 10-50x faster (L1 hit after invalidate).
++ *
++ *   Implementation roadmap (3 layers, all required):
++ *
++ *   1. CVA6 RTL — add Zicbom decoder + pipeline + cache wiring:
++ *      a. decoder.sv: funct3=010 (PREFETCH.R=0, CBO.CLEAN=1, CBO.FLUSH=2,
++ *         CBO.INVAL=6 encoded in funct12) currently decodes as illegal
++ *         (decoder.sv:452-466).  Add decode for CBO.INVAL (funct12=0x000,
++ *         funct3=010, opcode=MISC-MEM 0x0F).
++ *      b. Pipeline: route CBO.INVAL through issue → execute → cache port.
++ *         HPDCache already has CMO request ports as stubs (cva6.sv:1513-1536,
++ *         marked FIXME).  Wire decoded CBO.INVAL to dcache_cmo_req with
++ *         CMO_INVAL type.
++ *      c. HPDCache/wt_dcache: implement CMO_INVAL handler — invalidate the
++ *         cache line matching the address operand (rs1).  For write-through
++ *         L1, invalidate = clear valid bit (no writeback needed).
++ *      d. CSR: set cbo_block_size to L1 line size (typically 64B for CVA6
++ *         wt_dcache, verify via CACHELINE_BYTES or equivalent param).
++ *         Expose via riscv_cbom_block_size in DT or CSR enumerator.
++ *
++ *   2. Kernel (5.19+ or backport to 5.15):
++ *      a. CONFIG_RISCV_ISA_ZICBOM=y — enables arch/riscv/mm/dma-noncoherent.c
++ *         which implements dma_sync_*_for_cpu via cbo.inval loops.
++ *      b. DTS: remove DMA devices from reserved-memory NC pool (undo PMA NC
++ *         region workaround).  Let dma_alloc_coherent return normal cached
++ *         mapping.  Alternatively keep PMA NC for TX (device-coherent write)
++ *         and use cached + cbo.inval for RX only.
++ *      c. ARCH_HAS_SYNC_DMA_FOR_DEVICE + ARCH_HAS_SYNC_DMA_FOR_CPU must be
++ *         selected — these are the Kconfig symbols that enable the non-coherent
++ *         DMA path on RISC-V (broken/missing in 5.15, fixed in 5.19).
++ *      d. If backporting to 5.15: cherry-pick the riscv non-coherent DMA
++ *         series (commits around v5.19-rc1, Palmer Dabbelt / Christoph Hellwig).
++ *
++ *   3. OpenWiFi driver (this file):
++ *      a. Remove PMA NC workaround: let dma_alloc_coherent return cached buffer.
++ *      b. Phase RX-B: before reading slot metadata, call
++ *         dma_sync_single_for_cpu(dev, slot_dma_addr, RX_BD_BUF_SIZE,
++ *         DMA_FROM_DEVICE) — this issues cbo.inval for each cache line in the
++ *         slot (RX_BD_BUF_SIZE/64 = 64 cbo.inval instructions for 4096B slot).
++ *      c. Phase RX-C: after clearing pkt-exist flag, no sync needed — flag
++ *         clear is a write (cbo.clean or writeback handled by write-through).
++ *      d. dma_rmb() remains after sync (ordering, not coherency).
++ *      e. Benchmark: 64 × cbo.inval (~1-5 cycles each on in-order CVA6,
++ *         ~64-320 cycles total) vs current NC read penalty (~7K-30K cycles
++ *         for full packet memcpy).  Net gain: ~20-100x for the memcpy itself.
++ *
++ *   Risk: CVA6 HPDCache CMO stubs may need non-trivial wiring.  Validate with
++ *   a standalone Zicbom test (cbo.inval loop + DMA write + read-back) before
++ *   integrating into the driver.
++ *
++ *   Cross-repo ownership:
++ *     Layer 1 (RTL):   theshire repo — hw/vendor/openhwgroup_cva6/ (decoder.sv,
++ *                      cva6.sv, cache subsystem).  After RTL change, rebuild
++ *                      bitstream with `make vivado-fpga-synth-zcu104` (theshire)
++ *                      or openwifi-hw `make build-rtl PLATFORM=theshire`.
++ *     Layer 2 (Kernel): theshire repo — sw/deps/cva6-sdk/ (defconfig + patches).
++ *                      May need kernel 5.19+ or backport patches in linux_patch/.
++ *     Layer 3 (Driver): openwifi repo — driver/sdr_rx.c (this file).  Edit here,
++ *                      then regen patch via `util/regen_openwifi_patch.sh`.
++ *
++ *   Ref: RISC-V Zicbom spec (ratified), arch/riscv/mm/dma-noncoherent.c,
++ *   CVA6 decoder.sv:452-466, cva6.sv:1513-1536 (CMO stubs).
++ *
++ * NOTE(openwifi-rx-processing-smp): The rx_processing re-entrancy guard uses
++ *   test_and_set_bit — atomic on both SMP and UP.  On SMP, this prevents two
++ *   CPUs from both entering Phase RX-B, which would race on local_ampdu_ref
++ *   writeback in Phase RX-C.  Currently AMPDU aggregation is non-functional
++ *   (test_mode=0 → AGGR_ENABLE=false), but the guard is SMP-safe regardless.
 + */
 +
 +//=============================================================================
@@ -4774,11 +4942,9 @@ index 0000000..a78bcc8
 +#define OW_RX_PKT_EXIST_FLAG_CLEAR        0U
 +
 +#define OW_RX_RSSI_DBM_MIN             (-128)
-+#define OW_RX_WARN_UNEXPECTED_LOOP_COUNT 1U
 +
 +#define OW_MAC_ADDR_BCAST_LOW32          0xFFFFFFFFU
 +#define OW_MAC_ADDR_BCAST_HIGH16         0xFFFFU
-+#define OW_RX_SLOT_IDX_INVALID           (-1)
 +
 +/**
 + * @brief Read little-endian 16-bit value from an unaligned byte buffer.
@@ -4849,8 +5015,13 @@ index 0000000..a78bcc8
 + */
 +static inline void ow_rx_slot_flag_clear_release(u8 *slot_base)
 +{
-+  /* TODO(openwifi-rx-ordering): re-validate this ordering on board under
-+   * stress (ADI + Xilinx) with DMA diagnostics before tightening to dma_mb(). */
++  /* dma_wmb() is the correct barrier here — CPU→device write ordering only.
++   * Sequence: CPU reads slot metadata/payload (all NC, no cache) → dma_wmb()
++   * → CPU writes pkt-exist flag to zero → DMA engine sees cleared slot.
++   * No dma_mb() needed: all CPU reads from this slot preceded this function
++   * call, and PMA NC (CVA6) / device mapping (ARM) means no stale-cache
++   * concern for the read side.  dma_mb() would add a redundant device→CPU
++   * barrier.  Resolved: 2026-04-02. */
 +  dma_wmb();
 +  ow_rx_slot_flag_clear(slot_base);
 +}
@@ -4986,6 +5157,10 @@ index 0000000..a78bcc8
 +  u8 *pdata_tmp;
 +
 +  for (i = 0; i < NUM_RX_BD; i++) {
++    /* Skip slots currently claimed by Phase RX-A/RX-B — Phase RX-C will clear them. */
++    if (priv->rx_slot_claimed[i]) {
++      continue;
++    }
 +    pdata_tmp = priv->rx_cyclic_buf + i * RX_BD_BUF_SIZE;
 +    ow_rx_slot_flag_clear(pdata_tmp);
 +  }
@@ -5425,7 +5600,6 @@ index 0000000..a78bcc8
 +  struct ieee80211_hw *dev = data;
 +  struct openwifi_priv *priv = dev->priv;
 +  u32 irq49_snapshot;
-+  unsigned long flags;
 +  bool need_fallback;
 +  bool force_full_handler = false;
 +  unsigned long fallback_period_jiffies;
@@ -5471,51 +5645,17 @@ index 0000000..a78bcc8
 +  priv->rx_dma_cb_stall_count = 0;
 +  priv->rx_dma_cb_last_full_jiffies = jiffies;
 +  OW_U32_INC(priv->rx_dma_cb_full_count);
-+  /* Fallback executes the common RX handler directly.
-+   * Keep local IRQs masked while entering the handler to avoid same-CPU
-+   * hard-IRQ preemption on priv->lock while callback-driven RX handling may
-+   * hold that lock.
++  /* Fallback executes the common 3-phase RX handler directly.
 +   *
-+   * TODO(openwifi-rx-2phase): Refactor RX handling into a two-phase flow that
-+   * keeps priv->lock only for ring ownership state transitions.
++   * local_irq_save is no longer needed here.  The 3-phase handler holds
++   * priv->lock only in Phase RX-A (claim, ~2 us) and Phase RX-C (release, ~1 us).
++   * Phase RX-B (skb alloc + mac80211 handoff) runs with no lock held and local
++   * IRQs enabled — TX DMA completion IRQs can fire during Phase RX-B, breaking
++   * the death spiral that previously caused throughput collapse on single-core.
 +   *
-+   * Why:
-+   * - Current handler keeps priv->lock across slot scan + parse + skb alloc +
-+   *   mac80211 handoff, which can increase lock hold latency under load.
-+   *
-+   * Target design:
-+   * 1) Phase A (short, locked):
-+   *    - scan ring for ready slots;
-+   *    - claim each slot into a local work list;
-+   *    - update per-slot ownership state so IRQ and callback paths cannot
-+   *      process the same slot concurrently.
-+   * 2) Phase B (unlocked):
-+   *    - parse metadata and validate frame fields;
-+   *    - allocate/copy skb and push to mac80211;
-+   *    - collect post-processing actions for each claimed slot.
-+   * 3) Phase C (short, locked):
-+   *    - clear slot packet-exist marker and release ownership;
-+   *    - advance ring index bookkeeping for non-scan mode.
-+   *
-+   * Required invariants:
-+   * - each RX slot is claimed at most once per packet;
-+   * - Phase A must not clear pkt-exist marker before Phase B payload copy;
-+   * - slot clear/release remains ordered after consumer reads;
-+   * - fallback callback and real IRQ path cannot double-consume;
-+   * - updates of shared semantic state (for example ampdu_reference) remain
-+   *   serialized or use explicit lockless ordering guarantees;
-+   * - watchdog reset path must be claim-aware (no clear/rearm of claimed slot).
-+   *
-+   * Validation checklist:
-+   * - no duplicate/skipped sequence numbers under burst traffic;
-+   * - stable throughput and latency in scan-all-slots and non-scan modes;
-+   * - no increase in rx_invalid_header_count for healthy traffic;
-+   * - stop/start + watchdog recovery still clean (no stuck claimed slots);
-+   * - callback local_irq_save window does not increase worst-case IRQ-off time.
-+   */
-+  local_irq_save(flags);
++   * Re-entrancy safety: Phase RX-A's per-slot rx_slot_claimed[] flag prevents
++   * double-claiming the same slot from a concurrent IRQ or callback. */
 +  openwifi_rx_interrupt(0, data);
-+  local_irq_restore(flags);
 +}
 +
 +/**
@@ -5581,8 +5721,116 @@ index 0000000..a78bcc8
 +  return rssi_dbm;
 +}
 +
++/* DMA-to-CPU coherency analysis for the RX cyclic buffer.
++ *
++ * DMA-to-CPU coherency differs across the four build variants. The HW
++ * interconnect path determines whether DMA writes are visible to CPU
++ * caches, and the SW mapping determines whether CPU reads bypass cache.
++ *
++ * Variant 1-3: ARM64/ZynqMP (BD + ADI DMA, BD + Xilinx DMA, RTL + ADI DMA)
++ *   HW: DMA masters write via PS HP ports (non-coherent, bypass CCI-400):
++ *       RX DMA -> axi_interconnect_2 (BD) or PULP axi_mux (RTL) -> HP0
++ *       TX DMA -> axi_interconnect_0 (BD) or PULP axi_mux (RTL) -> HP3
++ *       (see openwifi-hw: flows/bd/05_connections.tcl lines 75-76,
++ *        flows/rtl/common/setup_vivado_project_common.tcl lines 998-1001,
++ *        soc_top_zynq.sv lines 740-810)
++ *   SW: dma_alloc_coherent() maps buffer non-cacheable via pgprot_dmacoherent
++ *       (= MT_NORMAL_NC on ARM64) because the DMA device is non-coherent
++ *       (dma-coherent is disabled in DTS, CacheCoherentDest=0 in RTL).
++ *       CPU reads go to DDR, never L1/L2. No cache invalidation needed.
++ *       dma_rmb() is the sole ordering mechanism — prevents the CPU from
++ *       speculatively reordering reads past the DMA completion.
++ *
++ * Variant 4: RISC-V/CVA6 (RTL Theshire + ADI DMA)
++ *   HW: DMA masters are wire-merged in theshire_wrapper.sv into Cheshire
++ *       ext_mst[0], then route through the Cheshire xbar -> LLC ->
++ *       dram_wrapper_xilinx -> PS HPC0. Note: HPC0 goes through CCI-400
++ *       which snoops the ARM A53 cluster, but CCI-400 has no visibility
++ *       into CVA6's L1 D-cache. CVA6 CPU shares the same LLC -> HPC0
++ *       backend path for DDR access.
++ *       (see openwifi-hw: flows/rtl/theshire/archived/.../ps_ddr_bridge.tcl,
++ *        docs/specs/spec_dma_subsystem.md lines 62-66,
++ *        rtl/theshire/theshire_wrapper.sv lines 560-673)
++ *   SW: dma_alloc_coherent() on RISC-V in kernels before 5.19 does NOT
++ *       set non-cacheable mapping (ARCH_HAS_DMA_SET_UNCACHED not selected
++ *       by arch/riscv). Buffer is CACHED in CVA6's write-through L1.
++ *       DMA writes update the LLC, but CVA6's L1 D-cache is not expected
++ *       to be snooped/invalidated by the LLC on ext_mst writes (no L1
++ *       coherency protocol between Cheshire LLC and CVA6 wt_dcache).
++ *       CPU reads hit stale L1 entries. FENCE.T invalidates entire
++ *       L1 D-cache (32KB). dma_rmb() then orders reads after invalidation.
++ *
++ * Summary: ARM variants need only dma_rmb() (SW non-cacheable mapping
++ * handles coherency). CVA6 with PMA NC region needs only dma_rmb()
++ * (DMA buffers bypass L1 via PMA). Without PMA NC, CVA6 would need
++ * FENCE.T + dma_rmb() (L1 is cached, LLC does not snoop L1 on DMA writes).
++ *
++ * Coherency is non-coherent at THREE levels on ARM (all must agree):
++ *   1. HW port: HP0/HP3 bypass CCI-400 (no cache snoop)
++ *   2. DTS: dma-coherent commented out (system.dts:2154) -> kernel's
++ *      dev_is_dma_coherent() returns false -> pgprot_dmacoherent mapping
++ *   3. RTL: CacheCoherentDest=0 in dma_subsystem_adi.sv:595 -> DMA
++ *      engine generates non-cacheable ARCACHE on AXI bus
++ * Changing any one without the others creates a coherency mismatch.
++ *
++ * Why FENCE.T is the only current option on CVA6:
++ *   - FENCE.T is a CVA6 custom security instruction (Custom0, 0x0B) that
++ *     flushes D-cache + I-cache + drains AXI + resets uarch (branch
++ *     predictor etc). It is overkill for DMA cache invalidation but is
++ *     the ONLY instruction on this CVA6 that can invalidate L1 D-cache.
++ *   - DcacheFlushOnFence=1 IS a viable fallback: it triggers a FULL L1
++ *     D-cache invalidation on standard FENCE (clears valid bits on ALL
++ *     lines including clean ones, not just dirty writeback). Tradeoff:
++ *     every FENCE in the kernel (spinlocks, barriers) also flushes 32KB
++ *     L1. PMA NC region is preferred (zero runtime overhead).
++ *     (cheshire_pkg.sv:786, wt_dcache_missunit.sv)
++ *   - Zicbom cbo.inval: not implemented in CVA6 decoder (decoder.sv:
++ *     452-466 decodes funct3=010 as illegal). HPDCache CMO ports exist
++ *     as stubs (cva6.sv:1513-1536 FIXME). Would need decoder + pipeline
++ *     + cache wiring in RTL, plus kernel 5.19+ (Zicbom merged upstream).
++ *   - Kernel DMA API is broken on RISC-V 5.15: dev_is_dma_coherent()
++ *     hardcoded true (dma-map-ops.h:249-261, none of ARCH_HAS_SYNC_DMA
++ *     symbols selected). dma_alloc_coherent returns normal cached ptr.
++ *
++ * IMPLEMENTED: PMA NC region at top of DDR (cheshire_pkg.sv DmaNcSize).
++ *   CVA6 PMA is a cacheable-address whitelist -- unlisted addresses bypass L1.
++ *   Ref: https://docs.openhwgroup.org/projects/cva6-user-manual/01_cva6_user/PMA.html
++ *   CachedRegionLength shrunk by 4 MiB, NrCachedRegionRules stays at 3.
++ *   DTS reserved-memory node binds DMA devices to NC pool via
++ *   of_reserved_mem_device_init() in dma-axi-dmac.c.
++ *   See docs/todo/todo_dma_cache_coherency.md for full investigation.
++ *   Long-term: Zicbom in CVA6 + kernel 5.19+ for standard RISC-V
++ *   non-coherent DMA (arch/riscv/mm/dma-noncoherent.c with cbo.inval).
++ *   See also: theshire docs/specs/spec_dma_subsystem.md.
++ */
++
 +/**
-+ * @brief RX interrupt handler that drains RX slots and pushes frames to mac80211.
++ * @brief 3-phase RX interrupt handler — drains RX slots and pushes frames to mac80211.
++ *
++ * Uses a 3-phase design to minimize lock hold time on single-core RISC-V (CVA6):
++ *
++ * Phase RX-A (short, locked):
++ *   Scan ring for ready slots.  Claim up to OW_RX_PHASE_A_BUDGET into a
++ *   stack-local work list.  Snapshot ampdu_reference per slot.  Set
++ *   rx_slot_claimed[] to prevent double-consume by concurrent IRQ/callback.
++ *
++ * Phase RX-B (unlocked, IRQs enabled):
++ *   For each claimed slot: dma_rmb(), parse metadata, validate, dev_alloc_skb(),
++ *   skb_put_data() (memcpy from NC DMA buffer), fill rx_status, call
++ *   ieee80211_rx_irqsafe(), update telemetry stats.
++ *   TX DMA completion IRQs can fire during this phase — breaking the death
++ *   spiral that previously collapsed throughput on single-core.
++ *
++ * Phase RX-C (short, locked):
++ *   Clear DMA slot flags (release ordering via dma_wmb), clear rx_slot_claimed[],
++ *   advance ring index (sequential mode), increment ampdu_reference for
++ *   ht_aggr_last slots in order.
++ *
++ * Invariants:
++ *   - Each slot is claimed at most once (rx_slot_claimed[] under priv->lock).
++ *   - DMA flag is not cleared until after Phase RX-B payload copy completes.
++ *   - Watchdog ring-clear skips claimed slots.
++ *   - ampdu_reference is seeded in Phase RX-A, tracked locally in Phase RX-B, written back in Phase RX-C.
 + *
 + * @param irq Linux IRQ number (0 when invoked from DMA callback fallback).
 + * @param dev_id ieee80211_hw pointer.
@@ -5592,10 +5840,16 @@ index 0000000..a78bcc8
 +{
 +  struct ieee80211_hw *dev = dev_id;
 +  struct openwifi_priv *priv = dev->priv;
-+  struct ieee80211_rx_status rx_status = {0};
++  struct ow_rx_work_entry work[OW_RX_PHASE_A_BUDGET];
++  unsigned long flags;
++  u32 n_claimed = 0;
++  u32 local_ampdu_ref = 0;
++  u32 i;
++  /* Phase RX-B per-slot locals. */
++  struct ieee80211_rx_status rx_status;
 +  struct sk_buff *skb;
 +  struct ieee80211_hdr *hdr;
-+  u32 addr1_low32, addr2_low32 = 0, addr3_low32 = 0, len, rate_idx, tsft_low, tsft_high, loop_count = 0;
++  u32 addr1_low32, addr2_low32 = 0, addr3_low32 = 0, len, rate_idx, tsft_low, tsft_high;
 +  bool ht_flag, short_gi, ht_aggr, ht_aggr_last;
 +  u8 *pdata_tmp;
 +  u8 fcs_ok;
@@ -5603,14 +5857,43 @@ index 0000000..a78bcc8
 +  u16 agc_status_and_pkt_exist_flag;
 +  u16 rssi_half_db;
 +  u16 addr1_high16;
-+  u16 addr2_high16 = 0;
-+  u16 addr3_high16 = 0;
++  u16 addr2_high16 = 0, addr3_high16 = 0;
 +  u16 seq_no = 0;
 +  bool content_ok, len_overflow, is_unicast;
-+  int rx_slot_idx_for_log = OW_RX_SLOT_IDX_INVALID;
-+#ifdef ENABLE_RX_SCAN_ALL_SLOTS
-+  int idx_slot;
-+#endif
++  int rx_slot_idx_for_log;
++
++  /* Always-on counter distinguishing real IRQ (irq != 0) from
++   * rx_dma_callback fallback path (irq == 0).  Placed BEFORE the re-entrancy
++   * guard so that a nested hardirq still increments the counter even when the
++   * guard causes an early return — otherwise the callback fallback heuristic
++   * sees no IRQ progress and enters fallback unnecessarily. */
++  if (irq != 0) {
++    OW_U32_INC(priv->rx_irq49_count);
++  }
++
++  /* Re-entrancy guard: prevents a nested hardirq from entering Phase RX-B
++   * while another context is already there — which would deliver newer slots
++   * to mac80211 before older ones (out-of-order delivery that hurts TCP).
++   * Return immediately; the outer do-while loop drains remaining slots.
++   *
++   * NOTE: FPGA rx_pkt_intr is a pulse (not level-held-while-pending), so
++   * after the hardirq returns + EOI, the PLIC sees the line deasserted and
++   * does NOT re-fire.  No interrupt storm.  A NEW packet arrival generates
++   * a new pulse which the PLIC latches normally.
++   *
++   * test_and_set_bit is atomic on both SMP and UP — safe for Zynq multi-core
++   * and CVA6 single-core nested IRQ.
++   *
++   * NOTE(openwifi-rx-missed-wakeup): If a new packet arrives during Phase RX-B
++   * after an under-budget claim, the nested IRQ returns early here and the
++   * outer do-while exits (n_claimed < budget).  That packet waits for the next
++   * IRQ pulse or DMA callback period (~1-4 ms).  This is NOT a regression —
++   * the old monolithic handler under local_irq_save also couldn't see packets
++   * arriving during processing.  NAPI would fix this by polling after the
++   * handler returns — see TODO(openwifi-rx-napi). */
++  if (test_and_set_bit(0, &priv->rx_processing)) {
++    return IRQ_HANDLED;
++  }
 +
 +#ifdef DEBUG_OPENWIFI
 +  ow_rx_irq_count++;
@@ -5622,135 +5905,84 @@ index 0000000..a78bcc8
 +  openwifi_rx_dump_early_slots(priv);
 +#endif
 +
-+  /* Always-on counter distinguishing real IRQ49 (irq != 0) from
-+   * rx_dma_callback fallback path (irq == 0). Used by watchdog and callback
-+   * gating logic to detect IRQ49 stalls. */
-+  if (irq != 0) {
-+    OW_U32_INC(priv->rx_irq49_count);
++  /* Loop back to Phase RX-A if the full budget was consumed — more slots may be
++   * waiting.  This avoids waiting for the next IRQ/callback under burst RX. */
++  do {
++  n_claimed = 0;
++
++  /* =================================================================
++   * Phase RX-A: locked, short — claim ready slots into work list.
++   * ================================================================= */
++#ifdef ENABLE_RX_SCAN_ALL_SLOTS
++  spin_lock_irqsave(&priv->lock, flags);
++  /* Rotating scan: start where the last invocation left off to avoid
++   * starving high-numbered slots under sustained load. */
++  {
++    int scan_count;
++    int raw_idx;
++
++    for (scan_count = 0; scan_count < NUM_RX_BD && n_claimed < OW_RX_PHASE_A_BUDGET; scan_count++) {
++      raw_idx = (priv->rx_scan_start_idx + scan_count) % NUM_RX_BD;
++      if (priv->rx_slot_claimed[raw_idx]) {
++        continue;
++      }
++      pdata_tmp = priv->rx_cyclic_buf + raw_idx * RX_BD_BUF_SIZE;
++      agc_status_and_pkt_exist_flag = ow_rx_slot_flag_get(pdata_tmp);
++      if (agc_status_and_pkt_exist_flag == OW_RX_PKT_EXIST_FLAG_CLEAR) {
++        continue;
++      }
++      priv->rx_slot_claimed[raw_idx] = 1U;
++      work[n_claimed].slot_idx       = (u8)raw_idx;
++      work[n_claimed].agc_flag       = agc_status_and_pkt_exist_flag;
++      work[n_claimed].ampdu_ref      = priv->ampdu_reference;
++      n_claimed++;
++    }
++    /* Advance start index past the last scanned position so the next
++     * invocation begins where this one stopped. */
++    priv->rx_scan_start_idx = (priv->rx_scan_start_idx + scan_count) % NUM_RX_BD;
++  }
++  spin_unlock_irqrestore(&priv->lock, flags);
++#else
++  spin_lock_irqsave(&priv->lock, flags);
++  {
++    u8 idx = priv->rx_target_buf_idx_old;
++
++    if (!priv->rx_slot_claimed[idx]) {
++      pdata_tmp = priv->rx_cyclic_buf + idx * RX_BD_BUF_SIZE;
++      agc_status_and_pkt_exist_flag = ow_rx_slot_flag_get(pdata_tmp);
++      if (agc_status_and_pkt_exist_flag != OW_RX_PKT_EXIST_FLAG_CLEAR) {
++        priv->rx_slot_claimed[idx] = 1U;
++        work[0].slot_idx       = idx;
++        work[0].agc_flag       = agc_status_and_pkt_exist_flag;
++        work[0].ampdu_ref      = priv->ampdu_reference;
++        n_claimed = 1U;
++      }
++    }
++  }
++  spin_unlock_irqrestore(&priv->lock, flags);
++#endif
++
++  if (n_claimed == 0U) {
++    break;
 +  }
 +
-+#ifdef ENABLE_RX_SCAN_ALL_SLOTS
-+  /* TODO(openwifi-rx-2phase-phase-a): keep lock scope here limited to
-+   * slot-ready scan + claim bookkeeping only. */
-+  spin_lock(&priv->lock);
-+#ifdef CONFIG_RISCV
-+  /* TODO(openwifi-rx-coherency): Re-enable if PMA NC region is not deployed.
-+   * CVA6 FENCE.T invalidates entire L1 D-cache. With PMA NC region, DMA
-+   * buffers bypass L1 — FENCE.T not needed. See dma_rmb() comment below.
-+   *
-+   * asm volatile(".insn r 0x0B, 0, 0, x0, x0, x0" ::: "memory");
-+   */
-+#endif
-+  for (idx_slot = 0; idx_slot < NUM_RX_BD; idx_slot++) {
-+    rx_slot_idx_for_log = idx_slot;
-+    pdata_tmp = priv->rx_cyclic_buf + idx_slot * RX_BD_BUF_SIZE;
-+    agc_status_and_pkt_exist_flag = ow_rx_slot_flag_get(pdata_tmp);
-+    if (agc_status_and_pkt_exist_flag == OW_RX_PKT_EXIST_FLAG_CLEAR) {
-+      continue;
-+    }
-+#else
-+  /* TODO(openwifi-rx-2phase-phase-a): keep lock scope here limited to
-+   * slot-ready scan + claim bookkeeping only. */
-+  spin_lock(&priv->lock);
-+#ifdef CONFIG_RISCV
-+  /* CVA6 FENCE.T — commented out, see ENABLE_RX_SCAN_ALL_SLOTS path above.
-+   *
-+   * asm volatile(".insn r 0x0B, 0, 0, x0, x0, x0" ::: "memory");
-+   */
-+#endif
-+  for (;;) {
-+    rx_slot_idx_for_log = priv->rx_target_buf_idx_old;
-+    pdata_tmp = priv->rx_cyclic_buf + priv->rx_target_buf_idx_old * RX_BD_BUF_SIZE;
-+    agc_status_and_pkt_exist_flag = ow_rx_slot_flag_get(pdata_tmp);
-+    if (agc_status_and_pkt_exist_flag == OW_RX_PKT_EXIST_FLAG_CLEAR) {
-+      break;
-+    }
-+#endif
++  /* Seed running AMPDU reference from the first slot's snapshot.
++   * Phase RX-B increments this locally on ht_aggr_last boundaries so that
++   * subsequent slots in the same batch get correct per-aggregate references. */
++  local_ampdu_ref = work[0].ampdu_ref;
 +
-+  /* TODO(openwifi-rx-2phase-phase-b): move metadata parse, skb allocation,
-+   * and ieee80211_rx_irqsafe handoff outside priv->lock. */
-+  /* Ensure subsequent metadata reads see data written by the DMA producer
-+   * after it set the pkt-exist marker.
-+   *
-+   * DMA-to-CPU coherency differs across the four build variants. The HW
-+   * interconnect path determines whether DMA writes are visible to CPU
-+   * caches, and the SW mapping determines whether CPU reads bypass cache.
-+   *
-+   * Variant 1-3: ARM64/ZynqMP (BD + ADI DMA, BD + Xilinx DMA, RTL + ADI DMA)
-+   *   HW: DMA masters write via PS HP ports (non-coherent, bypass CCI-400):
-+   *       RX DMA -> axi_interconnect_2 (BD) or PULP axi_mux (RTL) -> HP0
-+   *       TX DMA -> axi_interconnect_0 (BD) or PULP axi_mux (RTL) -> HP3
-+   *       (see openwifi-hw: flows/bd/05_connections.tcl lines 75-76,
-+   *        flows/rtl/common/setup_vivado_project_common.tcl lines 998-1001,
-+   *        soc_top_zynq.sv lines 740-810)
-+   *   SW: dma_alloc_coherent() maps buffer non-cacheable via pgprot_dmacoherent
-+   *       (= MT_NORMAL_NC on ARM64) because the DMA device is non-coherent
-+   *       (dma-coherent is disabled in DTS, CacheCoherentDest=0 in RTL).
-+   *       CPU reads go to DDR, never L1/L2. No cache invalidation needed.
-+   *       dma_rmb() is the sole ordering mechanism — prevents the CPU from
-+   *       speculatively reordering reads past the DMA completion.
-+   *
-+   * Variant 4: RISC-V/CVA6 (RTL Theshire + ADI DMA)
-+   *   HW: DMA masters are wire-merged in theshire_wrapper.sv into Cheshire
-+   *       ext_mst[0], then route through the Cheshire xbar -> LLC ->
-+   *       dram_wrapper_xilinx -> PS HPC0. Note: HPC0 goes through CCI-400
-+   *       which snoops the ARM A53 cluster, but CCI-400 has no visibility
-+   *       into CVA6's L1 D-cache. CVA6 CPU shares the same LLC -> HPC0
-+   *       backend path for DDR access.
-+   *       (see openwifi-hw: flows/rtl/theshire/archived/.../ps_ddr_bridge.tcl,
-+   *        docs/specs/spec_dma_subsystem.md lines 62-66,
-+   *        rtl/theshire/theshire_wrapper.sv lines 560-673)
-+   *   SW: dma_alloc_coherent() on RISC-V in kernels before 5.19 does NOT
-+   *       set non-cacheable mapping (ARCH_HAS_DMA_SET_UNCACHED not selected
-+   *       by arch/riscv). Buffer is CACHED in CVA6's write-through L1.
-+   *       DMA writes update the LLC, but CVA6's L1 D-cache is not expected
-+   *       to be snooped/invalidated by the LLC on ext_mst writes (no L1
-+   *       coherency protocol between Cheshire LLC and CVA6 wt_dcache).
-+   *       CPU reads hit stale L1 entries. FENCE.T above invalidates entire
-+   *       L1 D-cache (32KB). dma_rmb() then orders reads after invalidation.
-+   *
-+   * Summary: ARM variants need only dma_rmb() (SW non-cacheable mapping
-+   * handles coherency). CVA6 with PMA NC region needs only dma_rmb()
-+   * (DMA buffers bypass L1 via PMA). Without PMA NC, CVA6 would need
-+   * FENCE.T + dma_rmb() (L1 is cached, LLC does not snoop L1 on DMA writes).
-+   *
-+   * Coherency is non-coherent at THREE levels on ARM (all must agree):
-+   *   1. HW port: HP0/HP3 bypass CCI-400 (no cache snoop)
-+   *   2. DTS: dma-coherent commented out (system.dts:2154) → kernel's
-+   *      dev_is_dma_coherent() returns false → pgprot_dmacoherent mapping
-+   *   3. RTL: CacheCoherentDest=0 in dma_subsystem_adi.sv:595 → DMA
-+   *      engine generates non-cacheable ARCACHE on AXI bus
-+   * Changing any one without the others creates a coherency mismatch.
-+   *
-+   * Why FENCE.T is the only current option on CVA6:
-+   *   - FENCE.T is a CVA6 custom security instruction (Custom0, 0x0B) that
-+   *     flushes D-cache + I-cache + drains AXI + resets uarch (branch
-+   *     predictor etc). It is overkill for DMA cache invalidation but is
-+   *     the ONLY instruction on this CVA6 that can invalidate L1 D-cache.
-+   *   - DcacheFlushOnFence=1 IS a viable fallback: it triggers a FULL L1
-+   *     D-cache invalidation on standard FENCE (clears valid bits on ALL
-+   *     lines including clean ones, not just dirty writeback). Tradeoff:
-+   *     every FENCE in the kernel (spinlocks, barriers) also flushes 32KB
-+   *     L1. PMA NC region is preferred (zero runtime overhead).
-+   *     (cheshire_pkg.sv:786, wt_dcache_missunit.sv)
-+   *   - Zicbom cbo.inval: not implemented in CVA6 decoder (decoder.sv:
-+   *     452-466 decodes funct3=010 as illegal). HPDCache CMO ports exist
-+   *     as stubs (cva6.sv:1513-1536 FIXME). Would need decoder + pipeline
-+   *     + cache wiring in RTL, plus kernel 5.19+ (Zicbom merged upstream).
-+   *   - Kernel DMA API is broken on RISC-V 5.15: dev_is_dma_coherent()
-+   *     hardcoded true (dma-map-ops.h:249-261, none of ARCH_HAS_SYNC_DMA
-+   *     symbols selected). dma_alloc_coherent returns normal cached ptr.
-+   *
-+   * IMPLEMENTED: PMA NC region at top of DDR (cheshire_pkg.sv DmaNcSize).
-+   *   CVA6 PMA is a cacheable-address whitelist — unlisted addresses bypass L1.
-+   *   Ref: https://docs.openhwgroup.org/projects/cva6-user-manual/01_cva6_user/PMA.html
-+   *   CachedRegionLength shrunk by 4 MiB, NrCachedRegionRules stays at 3.
-+   *   DTS reserved-memory node binds DMA devices to NC pool via
-+   *   of_reserved_mem_device_init() in dma-axi-dmac.c.
-+   *   See docs/todo/todo_dma_cache_coherency.md for full investigation.
-+   *   Long-term: Zicbom in CVA6 + kernel 5.19+ for standard RISC-V
-+   *   non-coherent DMA (arch/riscv/mm/dma-noncoherent.c with cbo.inval).
-+   *   See also: theshire docs/specs/spec_dma_subsystem.md. */
++  /* =================================================================
++   * Phase RX-B: unlocked — parse, validate, alloc skb, mac80211 handoff.
++   * IRQs are enabled; TX DMA completion can fire during this phase.
++   * ================================================================= */
++  for (i = 0; i < n_claimed; i++) {
++  rx_slot_idx_for_log = (int)work[i].slot_idx;
++  pdata_tmp = priv->rx_cyclic_buf + work[i].slot_idx * RX_BD_BUF_SIZE;
++  agc_status_and_pkt_exist_flag = work[i].agc_flag;
++
++  /* DMA-to-CPU ordering barrier.  ARM NC mapping and CVA6 PMA NC region
++   * both make dma_rmb() the sole required barrier.  See git history of this
++   * function for the full 4-variant coherency analysis. */
 +  dma_rmb();
 +
 +  tsft_low = ow_rx_read_u32(pdata_tmp, OW_RX_META_OFF_TSFT_LOW_BYTES);
@@ -5791,11 +6023,7 @@ index 0000000..a78bcc8
 +      printk(KERN_DEBUG "%s openwifi_rx: WARNING content! len%d overflow%d rate_idx%d (total=%u)\n",
 +        sdr_compatible_str, len, len_overflow, rate_idx, priv->rx_invalid_header_count);
 +    }
-+    ow_rx_slot_flag_clear_release(pdata_tmp);
-+#ifndef ENABLE_RX_SCAN_ALL_SLOTS
-+    priv->rx_target_buf_idx_old = (priv->rx_target_buf_idx_old + 1U) % NUM_RX_BD;
-+#endif
-+    loop_count++;
++    /* Phase RX-C will clear the slot flag and advance the ring index. */
 +    continue;
 +  }
 +
@@ -5863,7 +6091,7 @@ index 0000000..a78bcc8
 +        rx_status.enc_flags |= RX_ENC_FLAG_SHORT_GI;
 +      }
 +      if (ht_aggr) {
-+        rx_status.ampdu_reference = priv->ampdu_reference;
++        rx_status.ampdu_reference = local_ampdu_ref;
 +        rx_status.flag |= RX_FLAG_AMPDU_DETAILS | RX_FLAG_AMPDU_LAST_KNOWN;
 +        if (ht_aggr_last) {
 +          rx_status.flag |= RX_FLAG_AMPDU_IS_LAST;
@@ -5915,32 +6143,46 @@ index 0000000..a78bcc8
 +    }
 +
 +    if (ht_aggr_last) {
-+      priv->ampdu_reference++;
++      local_ampdu_ref++;
 +    }
 +  }
-+  /* TODO(openwifi-rx-2phase-phase-c): perform slot-clear/release in a short
-+   * locked release phase after unlocked packet processing completes. */
-+  ow_rx_slot_flag_clear_release(pdata_tmp);
-+  loop_count++;
++  } /* end Phase RX-B */
++
++  /* =================================================================
++   * Phase RX-C: locked, short — release slots, advance ring, update ampdu_ref.
++   * ================================================================= */
++  spin_lock_irqsave(&priv->lock, flags);
++  for (i = 0; i < n_claimed; i++) {
++    pdata_tmp = priv->rx_cyclic_buf + work[i].slot_idx * RX_BD_BUF_SIZE;
++
++    ow_rx_slot_flag_clear_release(pdata_tmp);
++    priv->rx_slot_claimed[work[i].slot_idx] = 0U;
++
 +#ifndef ENABLE_RX_SCAN_ALL_SLOTS
-+  priv->rx_target_buf_idx_old = (priv->rx_target_buf_idx_old + 1U) % NUM_RX_BD;
++    priv->rx_target_buf_idx_old =
++      (priv->rx_target_buf_idx_old + 1U) % NUM_RX_BD;
 +#endif
 +  }
++  /* Write back the running AMPDU reference so the next batch (or next
++   * interrupt) sees the correct value. */
++  priv->ampdu_reference = local_ampdu_ref;
++  spin_unlock_irqrestore(&priv->lock, flags);
 +
-+  if (loop_count != OW_RX_WARN_UNEXPECTED_LOOP_COUNT &&
-+      (priv->drv_rx_reg_val[DRV_RX_REG_IDX_PRINT_CFG] & DMESG_LOG_ERROR)) {
-+    printk("%s openwifi_rx: WARNING loop_count %d\n", sdr_compatible_str, loop_count);
-+  }
++  /* NOTE: This do-while is bounded by the finite ring (NUM_RX_BD slots).
++   * DMA refill takes milliseconds per period; the CPU drains faster than
++   * DMA fills.  Worst case = NUM_RX_BD / BUDGET iterations (~8 at 64/8).
++   * No additional packet cap is needed. */
++  } while (n_claimed == OW_RX_PHASE_A_BUDGET);
 +
-+  spin_unlock(&priv->lock);
++  clear_bit(0, &priv->rx_processing);
 +  return IRQ_HANDLED;
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..84b3b35
+index 0000000..7bb5f99
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,1708 @@
+@@ -0,0 +1,1831 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -5954,6 +6196,37 @@ index 0000000..84b3b35
 + * - no-ack status policy:
 + *   frames marked IEEE80211_TX_CTL_NO_ACK report
 + *   IEEE80211_TX_STAT_NOACK_TRANSMITTED on successful completion.
++ */
++
++//=============================================================================
++// Deferred Performance Work (not blocking current commit)
++//=============================================================================
++/*
++ * TODO(openwifi-tx-completion-irq): Replace TX pre-submit udelay polling with
++ *   completion interrupt.  Each TX packet busy-waits up to tx_dma_wait_us
++ *   (default 100 us on CVA6, 1000 us on Zynq) for DMA completion.  At 100 MHz
++ *   CVA6, 100 us = 10K wasted cycles per packet worst case.  The TX DMA engine
++ *   already has IRQ support — use a completion-based submit flow instead.
++ *   struct completion tx_dma_complete exists in sdr.h (commented out) but
++ *   was never wired up.  Note: wait_for_completion is illegal from softirq
++ *   context where openwifi_tx runs — needs deferred submission model.
++ *
++ * DONE(openwifi-tx-queue-wake-unlock): Moved ieee80211_wake_queue() calls
++ *   outside priv->lock in the TX interrupt handler.  Wake decisions are
++ *   snapshotted via ow_tx_ring_clear_stopped() under lock; actual
++ *   ieee80211_wake_queue() calls happen in Phase TX-B via ow_tx_wake_from_mask().
++ *   The combined ow_tx_ring_wake_all_stopped() helper is kept for non-hot-path
++ *   call sites (recovery, reclaim, stall clear).
++ *
++ * TODO(openwifi-tx-bounce-prealloc): Pre-allocate per-ring bounce buffer.
++ *   Currently kmalloc(GFP_ATOMIC) + memcpy on DMA-misaligned frames.  Pre-
++ *   allocate one bounce buffer per SW ring slot at openwifi_start, indexed by
++ *   bd_wr_idx mod NUM_TX_BD.  Eliminates GFP_ATOMIC from softirq TX path.
++ *
++ * DONE(openwifi-tx-dma-map-unlock): Moved dma_map_single() before priv->lock
++ *   in the TX submit path.  The cache flush (~10-50 us on non-coherent RISC-V
++ *   for 1500B) no longer blocks the TX IRQ.  Error paths route through
++ *   openwifi_tx_after_dma_mapping for proper unmap.
 + */
 +
 +//=============================================================================
@@ -6133,21 +6406,49 @@ index 0000000..84b3b35
 +}
 +
 +/**
-+ * @brief Wake and clear all stopped Linux priorities tracked on a TX ring.
++ * @brief Snapshot and clear stopped priorities on a TX ring (call under lock).
++ *
++ * Returns the mask of priorities that were stopped.  Caller should pass the
++ * returned mask to ow_tx_wake_from_mask() AFTER releasing priv->lock so that
++ * ieee80211_wake_queue() runs without holding the driver lock.
 + */
-+static inline void ow_tx_ring_wake_all_stopped(struct ieee80211_hw *dev, struct openwifi_ring *ring)
++static inline u8 ow_tx_ring_clear_stopped(struct openwifi_ring *ring)
++{
++  u8 mask = ring->stop_prio_mask;
++
++  ring->stop_prio_mask = 0U;
++  ring->stop_flag = -1;
++  return mask;
++}
++
++/**
++ * @brief Wake mac80211 queues from a previously snapshotted mask (call OUTSIDE lock).
++ */
++static inline void ow_tx_wake_from_mask(struct ieee80211_hw *dev, u8 mask)
 +{
 +  u8 prio;
-+  u8 mask_snapshot;
 +
-+  mask_snapshot = ring->stop_prio_mask;
 +  for (prio = 0; prio < MAX_NUM_HW_QUEUE; prio++) {
-+    if ((mask_snapshot & BIT(prio)) != 0U) {
++    if ((mask & BIT(prio)) != 0U) {
 +      ieee80211_wake_queue(dev, prio);
 +    }
 +  }
-+  ring->stop_prio_mask = 0U;
-+  ring->stop_flag = -1;
++}
++
++/**
++ * @brief Wake and clear all stopped Linux priorities tracked on a TX ring.
++ *
++ * NOTE: This combined helper calls ieee80211_wake_queue under whatever lock
++ * the caller holds.  In the TX interrupt handler, prefer the split pattern:
++ * ow_tx_ring_clear_stopped() under lock → ow_tx_wake_from_mask() after unlock.
++ * This combined version is kept for call sites outside the hot path (recovery,
++ * reclaim, stall clear) where the lock hold is already short.
++ */
++static inline void ow_tx_ring_wake_all_stopped(struct ieee80211_hw *dev, struct openwifi_ring *ring)
++{
++  u8 mask = ow_tx_ring_clear_stopped(ring);
++
++  ow_tx_wake_from_mask(dev, mask);
 +}
 +
 +/**
@@ -6565,6 +6866,8 @@ index 0000000..84b3b35
 +
 +  if (READ_ONCE(priv->tx_dma_recovery_enabled) && !READ_ONCE(priv->tx_dma_terminating)) {
 +    WRITE_ONCE(priv->tx_dma_stalled, true);
++    /* NOTE: stop_queue under lock — stall entry path, fires on DMA timeout
++     * (~once per stall event).  Hot-path wakes are outside lock. */
 +    for (idx_hw_queue = 0; idx_hw_queue < MAX_NUM_HW_QUEUE; idx_hw_queue++) {
 +      if (!ow_tx_ring_stop_has_prio(&priv->tx_ring[idx_hw_queue], (u8)idx_hw_queue)) {
 +        ieee80211_stop_queue(dev, idx_hw_queue);
@@ -6590,7 +6893,15 @@ index 0000000..84b3b35
 +}
 +
 +/**
-+ * @brief TX completion interrupt handler for descriptor retirement and status.
++ * @brief 2-phase TX completion interrupt handler.
++ *
++ * Phase TX-A (locked): Read FPGA completion FIFOs, snapshot per-packet info
++ * (skb, dma_addr, bounce_buf) from ring, update ring indices, handle
++ * queue wake decisions.  All FPGA MMIO reads and ring bookkeeping here.
++ *
++ * Phase TX-B (unlocked): dma_unmap_single, kfree(bounce_buf), and
++ * ieee80211_tx_status_irqsafe for each completed packet.  These are the
++ * expensive operations that previously held priv->lock.
 + *
 + * @param irq Linux IRQ number.
 + * @param dev_id ieee80211_hw pointer.
@@ -6613,6 +6924,15 @@ index 0000000..84b3b35
 +  bool tx_fail = false, fpga_queue_has_room = false;
 +  bool use_ht_aggr, pkt_need_ack, use_ht_rate;
 +  int idx_hw_queue;
++  /* Phase TX-B deferred work lists. */
++  struct ow_tx_done_entry tx_done[OW_TX_DONE_BUDGET];
++  u32 n_done = 0;
++  /* Deferred queue wake masks — populated under lock, applied after unlock.
++   * NOTE: keeps ieee80211_wake_queue() outside priv->lock to reduce lock
++   * hold time in the TX interrupt hot path. */
++  u8 wake_masks[MAX_NUM_HW_QUEUE];
++
++  memset(wake_masks, 0, sizeof(wake_masks));
 +
 +  spin_lock(&priv->lock);
 +
@@ -6655,7 +6975,7 @@ index 0000000..84b3b35
 +        WRITE_ONCE(priv->tx_dma_stall_first_jiffies, 0);
 +        for (idx_hw_queue = 0; idx_hw_queue < MAX_NUM_HW_QUEUE; idx_hw_queue++) {
 +          if (priv->tx_ring[idx_hw_queue].stop_prio_mask != 0U) {
-+            ow_tx_ring_wake_all_stopped(dev, &priv->tx_ring[idx_hw_queue]);
++            wake_masks[idx_hw_queue] |= ow_tx_ring_clear_stopped(&priv->tx_ring[idx_hw_queue]);
 +          }
 +        }
 +      }
@@ -6685,7 +7005,7 @@ index 0000000..84b3b35
 +            }
 +            priv->stat.tx_queue_wakeup_num[queue_idx]++;
 +          }
-+          ow_tx_ring_wake_all_stopped(dev, drv_ring_tmp);
++          wake_masks[queue_idx] |= ow_tx_ring_clear_stopped(drv_ring_tmp);
 +        } else {
 +          if (priv->drv_tx_reg_val[DRV_TX_REG_IDX_PRINT_CFG] & DMESG_LOG_NORMAL_QUEUE_STOP) {
 +            printk("%s openwifi_tx_interrupt: WARNING queue%d still no room, stop_mask=0x%02x\n",
@@ -6712,11 +7032,13 @@ index 0000000..84b3b35
 +
 +        skb = ring->bds[ring->bd_rd_idx].skb_linked;
 +
-+        dma_unmap_single(priv->tx_chan->device->dev, ring->bds[ring->bd_rd_idx].dma_mapping_addr,
-+          ring->bds[ring->bd_rd_idx].dma_len_bytes, DMA_MEM_TO_DEV);
-+        /* Free optional aligned bounce buffer after DMA unmap. */
-+        kfree(ring->bds[ring->bd_rd_idx].bounce_buf);
-+        ring->bds[ring->bd_rd_idx].bounce_buf = NULL;
++        /* Snapshot DMA info for Phase TX-B (unlocked unmap/free/status). */
++        if (n_done < OW_TX_DONE_BUDGET) {
++          tx_done[n_done].skb        = skb;
++          tx_done[n_done].dma_addr   = ring->bds[ring->bd_rd_idx].dma_mapping_addr;
++          tx_done[n_done].dma_len_bytes = ring->bds[ring->bd_rd_idx].dma_len_bytes;
++          tx_done[n_done].bounce_buf = ring->bds[ring->bd_rd_idx].bounce_buf;
++        }
 +
 +        info = IEEE80211_SKB_CB(skb);
 +        use_ht_aggr = ((info->flags&IEEE80211_TX_CTL_AMPDU)!=0);
@@ -6806,12 +7128,27 @@ index 0000000..84b3b35
 +            nof_retx + 1, !tx_fail, seq_no, prio, queue_idx, ring->bd_wr_idx, ring->bd_rd_idx, num_slot_random, cw, hw_queue_len, dma_fifo_no_room_flag);
 +        }
 +
-+        ieee80211_tx_status_irqsafe(dev, skb);
++        /* Defer ieee80211_tx_status_irqsafe to Phase TX-B (unlocked). */
++        if (n_done < OW_TX_DONE_BUDGET) {
++          n_done++;
++        } else {
++          /* Budget exceeded — fall back to inline completion under lock.
++           * NOTE: with AMPDU disabled (pkt_cnt=1 per completion) and budget=8,
++           * this path requires 9+ back-to-back completions before CPU services
++           * the interrupt — rare on CVA6 with per-packet udelay.  If this
++           * becomes a problem, increase OW_TX_DONE_BUDGET or chunk-drain. */
++          dma_unmap_single(priv->tx_chan->device->dev,
++            ring->bds[ring->bd_rd_idx].dma_mapping_addr,
++            ring->bds[ring->bd_rd_idx].dma_len_bytes, DMA_MEM_TO_DEV);
++          kfree(ring->bds[ring->bd_rd_idx].bounce_buf);
++          ieee80211_tx_status_irqsafe(dev, skb);
++        }
 +
 +        ring->bds[ring->bd_rd_idx].prio = OPENWIFI_TX_PRIO_INVALID;
 +        ring->bds[ring->bd_rd_idx].len_mpdu = 0; /* invalid marker */
 +        ring->bds[ring->bd_rd_idx].seq_no = OPENWIFI_TX_SEQ_INVALID;
 +        ring->bds[ring->bd_rd_idx].skb_linked = NULL;
++        ring->bds[ring->bd_rd_idx].bounce_buf = NULL;
 +        ring->bds[ring->bd_rd_idx].dma_mapping_addr = 0;
 +        ring->bds[ring->bd_rd_idx].dma_len_bytes = 0;
 +      }
@@ -6827,6 +7164,25 @@ index 0000000..84b3b35
 +  }
 +
 +  spin_unlock(&priv->lock);
++
++  /* =================================================================
++   * Phase TX-B: unlocked — queue wakes, DMA unmap, free bounce buf, mac80211 TX status.
++   * ================================================================= */
++
++  /* Deferred queue wakes — decided under lock, executed here. */
++  for (idx_hw_queue = 0; idx_hw_queue < MAX_NUM_HW_QUEUE; idx_hw_queue++) {
++    if (wake_masks[idx_hw_queue] != 0U) {
++      ow_tx_wake_from_mask(dev, wake_masks[idx_hw_queue]);
++    }
++  }
++
++  for (i = 0; i < n_done; i++) {
++    dma_unmap_single(priv->tx_chan->device->dev,
++      tx_done[i].dma_addr, tx_done[i].dma_len_bytes, DMA_MEM_TO_DEV);
++    kfree(tx_done[i].bounce_buf);
++    ieee80211_tx_status_irqsafe(dev, tx_done[i].skb);
++  }
++
 +  return IRQ_HANDLED;
 +}
 +
@@ -7107,6 +7463,8 @@ index 0000000..84b3b35
 +      printk("%s openwifi_tx: WARNING real stop queue lnx prio%d map to q%d stop%d hwq len%d wr%d rd%d bd prio%d len_mpdu%d seq_no%d skb_linked%p dma_mapping_addr=%pad\n", sdr_compatible_str,
 +      prio, drv_ring_idx, ring->stop_flag, hw_queue_len, ring->bd_wr_idx, ring->bd_rd_idx, ring->bds[j].prio, ring->bds[j].len_mpdu, ring->bds[j].seq_no, ring->bds[j].skb_linked, &ring->bds[j].dma_mapping_addr);
 +
++      /* NOTE: stop_queue under lock — same rationale as TX submit path.
++       * This is the reclaim/ring-wrap path, fires rarely. */
 +      if (!ow_tx_ring_stop_has_prio(ring, prio)) {
 +        ieee80211_stop_queue(dev, prio); /* stop priority mapped to no-room queue */
 +        ow_tx_ring_stop_set_prio(ring, prio);
@@ -7512,13 +7870,24 @@ index 0000000..84b3b35
 +    }
 +  }
 +
++  /* DMA map BEFORE acquiring priv->lock — the cache flush (~10-50 us on
++   * non-coherent RISC-V for 1500B) does not need shared state and was the
++   * largest single cost inside the locked TX submit section. */
++  dma_mapping_addr = dma_map_single(priv->tx_chan->device->dev, dma_buf,
++         num_dma_byte, DMA_MEM_TO_DEV);
++
++  if (dma_mapping_error(priv->tx_chan->device->dev, dma_mapping_addr)) {
++    printk("%s openwifi_tx: WARNING sn %d TX DMA mapping error\n", sdr_compatible_str, ring->bd_wr_idx);
++    goto openwifi_tx_early_out_free_bounce;
++  }
++
 +  spin_lock_irqsave(&priv->lock, flags); /* ring stop mask is shared with TX interrupt path */
 +
 +  /* Recheck after DMA poll loop: the recovery worker may have set
 +   * tx_dma_terminating during the poll (up to tx_dma_wait_us window).
 +   * Without this, we could submit into a channel mid-terminate. */
 +  if (READ_ONCE(priv->tx_dma_terminating)) {
-+    goto openwifi_tx_early_out_after_lock;
++    goto openwifi_tx_after_dma_mapping;
 +  }
 +
 +  /* Check whether FPGA DMA FIFO and target queue have enough room. */
@@ -7539,6 +7908,11 @@ index 0000000..84b3b35
 +        printk("%s openwifi_tx: WARNING ieee80211_stop_queue prio%d queue%d no room flag%x hwq len%08x request%d wr%d rd%d\n", sdr_compatible_str,
 +                prio, queue_idx, dma_fifo_no_room_flag, hw_queue_len, num_dma_symbol, ring->bd_wr_idx, ring->bd_rd_idx);
 +      }
++      /* NOTE: ieee80211_stop_queue under lock is intentional here.  This is
++       * the queue-full path (rare — only when FPGA FIFO/queue runs out of room).
++       * The hot-path wake calls are already outside lock (Phase TX-B wake_masks).
++       * Moving stop_queue outside lock would require snapshot + defer for a path
++       * that fires ~0.1% of TX packets.  Not worth the complexity. */
 +      if (!prio_already_stopped) {
 +        ieee80211_stop_queue(dev, prio);
 +        ow_tx_ring_stop_set_prio(ring, prio);
@@ -7565,19 +7939,10 @@ index 0000000..84b3b35
 +       *    with explicit tx status reporting;
 +       * 5) queue semantics: wake queues only after pending slot is consumed or
 +       *    dropped to avoid reordering/starvation. */
-+      goto openwifi_tx_early_out_after_lock;
++      goto openwifi_tx_after_dma_mapping;
 +    }
 +  }
 +  /* End of queue room check. */
-+
-+  /* Fire skb DMA to hardware. */
-+  dma_mapping_addr = dma_map_single(priv->tx_chan->device->dev, dma_buf,
-+         num_dma_byte, DMA_MEM_TO_DEV);
-+
-+  if (dma_mapping_error(priv->tx_chan->device->dev,dma_mapping_addr)) {
-+    printk("%s openwifi_tx: WARNING sn %d TX DMA mapping error\n", sdr_compatible_str, ring->bd_wr_idx);
-+    goto openwifi_tx_early_out_after_lock;
-+  }
 +
 +  sg_init_table(&(priv->tx_sg), 1); /* single-segment mapping per TX submit */
 +  sg_dma_address( &(priv->tx_sg) ) = dma_mapping_addr;
@@ -11456,10 +11821,10 @@ index 0000000..b04b41a
 +};
 diff --git a/drivers/tx_intf/tx_intf.c b/drivers/tx_intf/tx_intf.c
 new file mode 100644
-index 0000000..cdc2716
+index 0000000..5e09a59
 --- /dev/null
 +++ b/drivers/tx_intf/tx_intf.c
-@@ -0,0 +1,532 @@
+@@ -0,0 +1,496 @@
 +/*
 + * axi lite register access driver
 + * Author: Xianjun Jiao, Michael Mehari, Wei Liu
@@ -11662,39 +12027,8 @@ index 0000000..cdc2716
 +  reg_write(TX_INTF_REG_PHY_HDR_CONFIG_ADDR, value);
 +}
 +
-+static inline void ow_tx_intf_warn_ro_write_ignored(const char *reg_name)
-+{
-+  /* TODO(openwifi-tx-status-ro-api-cleanup): once upper-layer users stop
-+   * calling these write accessors, remove the write hooks entirely from
-+   * tx_intf_driver_api / hw_def.h instead of warn-and-ignore stubs. */
-+  printk_once(KERN_WARNING "%s %s write ignored (read-only register in current RTL)\n",
-+    tx_intf_compatible_str, reg_name);
-+}
-+
-+static inline void TX_INTF_REG_S_AXIS_FIFO_NO_ROOM_write(u32 value){
-+  (void)value;
-+  ow_tx_intf_warn_ro_write_ignored("TX_INTF_REG_S_AXIS_FIFO_NO_ROOM");
-+}
-+
-+static inline void TX_INTF_REG_PKT_INFO1_write(u32 value){
-+  (void)value;
-+  ow_tx_intf_warn_ro_write_ignored("TX_INTF_REG_PKT_INFO1");
-+}
-+
-+static inline void TX_INTF_REG_PKT_INFO2_write(u32 value){
-+  (void)value;
-+  ow_tx_intf_warn_ro_write_ignored("TX_INTF_REG_PKT_INFO2");
-+}
-+
-+static inline void TX_INTF_REG_PKT_INFO3_write(u32 value){
-+  (void)value;
-+  ow_tx_intf_warn_ro_write_ignored("TX_INTF_REG_PKT_INFO3");
-+}
-+
-+static inline void TX_INTF_REG_PKT_INFO4_write(u32 value){
-+  (void)value;
-+  ow_tx_intf_warn_ro_write_ignored("TX_INTF_REG_PKT_INFO4");
-+}
++/* TX_INTF_REG_S_AXIS_FIFO_NO_ROOM, PKT_INFO1-4 RO write stubs removed
++ * 2026-04-02 — zero callers remained after TX refactor.  See hw_def.h. */
 +
 +static const struct of_device_id dev_of_ids[] = {
 +  { .compatible = "sdr,tx_intf", },
@@ -11934,11 +12268,6 @@ index 0000000..cdc2716
 +  tx_intf_api->TX_INTF_REG_BB_GAIN_write=TX_INTF_REG_BB_GAIN_write;
 +  tx_intf_api->TX_INTF_REG_ANT_SEL_write=TX_INTF_REG_ANT_SEL_write;
 +  tx_intf_api->TX_INTF_REG_PHY_HDR_CONFIG_write=TX_INTF_REG_PHY_HDR_CONFIG_write;
-+  tx_intf_api->TX_INTF_REG_S_AXIS_FIFO_NO_ROOM_write=TX_INTF_REG_S_AXIS_FIFO_NO_ROOM_write;
-+  tx_intf_api->TX_INTF_REG_PKT_INFO1_write=TX_INTF_REG_PKT_INFO1_write;
-+  tx_intf_api->TX_INTF_REG_PKT_INFO2_write=TX_INTF_REG_PKT_INFO2_write;
-+  tx_intf_api->TX_INTF_REG_PKT_INFO3_write=TX_INTF_REG_PKT_INFO3_write;
-+  tx_intf_api->TX_INTF_REG_PKT_INFO4_write=TX_INTF_REG_PKT_INFO4_write;
 +
 +  /* Request and map I/O memory */
 +  io = platform_get_resource(pdev, IORESOURCE_MEM, 0);

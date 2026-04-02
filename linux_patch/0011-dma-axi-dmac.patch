@@ -12,7 +12,7 @@ index 90284ff..c41d5d3 100644
  	select DMA_VIRTUAL_CHANNELS
  	select REGMAP_MMIO
 diff --git a/drivers/dma/dma-axi-dmac.c b/drivers/dma/dma-axi-dmac.c
-index 5161b73..34705be 100644
+index 5161b73..14f753f 100644
 --- a/drivers/dma/dma-axi-dmac.c
 +++ b/drivers/dma/dma-axi-dmac.c
 @@ -9,6 +9,7 @@
@@ -74,7 +74,7 @@ index 5161b73..34705be 100644
  #define AXI_DMAC_REG_PARTIAL_XFER_LEN	0x44c
  #define AXI_DMAC_REG_PARTIAL_XFER_ID	0x450
  
-@@ -147,6 +167,38 @@ struct axi_dmac {
+@@ -147,6 +167,46 @@ struct axi_dmac {
  	struct axi_dmac_chan chan;
  };
  
@@ -102,7 +102,15 @@ index 5161b73..34705be 100644
 +#define AXI_DMAC_THS_NC_POOL_PHYS  0xffc00000ULL
 +#define AXI_DMAC_THS_NC_POOL_SIZE  0x00400000ULL
 +static struct dma_coherent_mem *axi_dmac_ths_nc_pool;
-+static int axi_dmac_ths_nc_pool_users;
++/* NOTE: atomic because probe/remove can theoretically run concurrently on
++ * SMP (deferred probe, hot-unplug).  In practice on Theshire, all 4 DMACs
++ * probe sequentially during built-in initcall.
++ *
++ * NOTE(openwifi-dmac-submodule-sync): This file is the CANONICAL source.
++ * The adi-linux-64/ submodule working copy is updated when regen_dma_patch.sh
++ * runs in the theshire repo and the generated patch is applied during kernel
++ * build.  The submodule copy may lag behind this file — that is expected. */
++static atomic_t axi_dmac_ths_nc_pool_users = ATOMIC_INIT(0);
 +
 +static bool axi_dmac_use_ths_nc_pool(void)
 +{
@@ -113,7 +121,7 @@ index 5161b73..34705be 100644
  static struct axi_dmac *chan_to_axi_dmac(struct axi_dmac_chan *chan)
  {
  	return container_of(chan->vchan.chan.device, struct axi_dmac,
-@@ -208,10 +260,8 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
+@@ -208,10 +268,8 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
  	struct axi_dmac_sg *sg;
  	unsigned int flags = 0;
  	unsigned int val;
@@ -126,7 +134,7 @@ index 5161b73..34705be 100644
  
  	desc = chan->next_desc;
  
-@@ -221,14 +271,60 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
+@@ -221,14 +279,60 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
  			return;
  		list_move_tail(&vdesc->node, &chan->active_descs);
  		desc = to_axi_dmac_desc(vdesc);
@@ -187,7 +195,7 @@ index 5161b73..34705be 100644
  
  	desc->num_submitted++;
  	if (desc->num_submitted == desc->num_sgs ||
-@@ -238,8 +334,6 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
+@@ -238,8 +342,6 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
  		else
  			chan->next_desc = NULL;
  		flags |= AXI_DMAC_FLAG_LAST;
@@ -196,7 +204,7 @@ index 5161b73..34705be 100644
  	}
  
  	sg->id = axi_dmac_read(dmac, AXI_DMAC_REG_TRANSFER_ID);
-@@ -266,9 +360,41 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
+@@ -266,9 +368,41 @@ static void axi_dmac_start_transfer(struct axi_dmac_chan *chan)
  	if (chan->hw_partial_xfer)
  		flags |= AXI_DMAC_FLAG_PARTIAL_REPORT;
  
@@ -238,7 +246,7 @@ index 5161b73..34705be 100644
  	axi_dmac_write(dmac, AXI_DMAC_REG_START_TRANSFER, 1);
  }
  
-@@ -287,6 +413,18 @@ static inline unsigned int axi_dmac_total_sg_bytes(struct axi_dmac_chan *chan,
+@@ -287,6 +421,18 @@ static inline unsigned int axi_dmac_total_sg_bytes(struct axi_dmac_chan *chan,
  		return sg->x_len;
  }
  
@@ -257,7 +265,7 @@ index 5161b73..34705be 100644
  static void axi_dmac_dequeue_partial_xfers(struct axi_dmac_chan *chan)
  {
  	struct axi_dmac *dmac = chan_to_axi_dmac(chan);
-@@ -371,11 +509,16 @@ static bool axi_dmac_transfer_done(struct axi_dmac_chan *chan,
+@@ -371,11 +517,16 @@ static bool axi_dmac_transfer_done(struct axi_dmac_chan *chan,
  		axi_dmac_dequeue_partial_xfers(chan);
  
  	do {
@@ -274,7 +282,7 @@ index 5161b73..34705be 100644
  		active->num_completed++;
  		sg->id = AXI_DMAC_SG_UNUSED;
  		if (sg->schedule_when_free) {
-@@ -383,14 +526,26 @@ static bool axi_dmac_transfer_done(struct axi_dmac_chan *chan,
+@@ -383,14 +534,26 @@ static bool axi_dmac_transfer_done(struct axi_dmac_chan *chan,
  			start_next = true;
  		}
  
@@ -304,7 +312,7 @@ index 5161b73..34705be 100644
  			if (active->cyclic) {
  				active->num_completed = 0; /* wrap around */
  			} else {
-@@ -399,6 +554,10 @@ static bool axi_dmac_transfer_done(struct axi_dmac_chan *chan,
+@@ -399,6 +562,10 @@ static bool axi_dmac_transfer_done(struct axi_dmac_chan *chan,
  				active = axi_dmac_active_desc(chan);
  			}
  		}
@@ -315,7 +323,7 @@ index 5161b73..34705be 100644
  	} while (active);
  
  	return start_next;
-@@ -408,25 +567,81 @@ static irqreturn_t axi_dmac_interrupt_handler(int irq, void *devid)
+@@ -408,25 +575,81 @@ static irqreturn_t axi_dmac_interrupt_handler(int irq, void *devid)
  {
  	struct axi_dmac *dmac = devid;
  	unsigned int pending;
@@ -406,7 +414,7 @@ index 5161b73..34705be 100644
  	spin_unlock(&dmac->chan.vchan.lock);
  
  	return IRQ_HANDLED;
-@@ -498,8 +713,13 @@ static struct axi_dmac_sg *axi_dmac_fill_linear_sg(struct axi_dmac_chan *chan,
+@@ -498,8 +721,13 @@ static struct axi_dmac_sg *axi_dmac_fill_linear_sg(struct axi_dmac_chan *chan,
  	unsigned int segment_size;
  	unsigned int len;
  
@@ -422,7 +430,7 @@ index 5161b73..34705be 100644
  	segment_size = DIV_ROUND_UP(period_len, num_segments);
  	/* Take care of alignment */
  	segment_size = ((segment_size - 1) | chan->length_align_mask) + 1;
-@@ -573,6 +793,21 @@ static struct dma_async_tx_descriptor *axi_dmac_prep_slave_sg(
+@@ -573,6 +801,21 @@ static struct dma_async_tx_descriptor *axi_dmac_prep_slave_sg(
  	return vchan_tx_prep(&chan->vchan, &desc->vdesc, flags);
  }
  
@@ -444,7 +452,7 @@ index 5161b73..34705be 100644
  static struct dma_async_tx_descriptor *axi_dmac_prep_dma_cyclic(
  	struct dma_chan *c, dma_addr_t buf_addr, size_t buf_len,
  	size_t period_len, enum dma_transfer_direction direction,
-@@ -709,6 +944,9 @@ static bool axi_dmac_regmap_rdwr(struct device *dev, unsigned int reg)
+@@ -709,6 +952,9 @@ static bool axi_dmac_regmap_rdwr(struct device *dev, unsigned int reg)
  	case AXI_DMAC_REG_STATUS:
  	case AXI_DMAC_REG_CURRENT_SRC_ADDR:
  	case AXI_DMAC_REG_CURRENT_DEST_ADDR:
@@ -454,7 +462,7 @@ index 5161b73..34705be 100644
  	case AXI_DMAC_REG_PARTIAL_XFER_LEN:
  	case AXI_DMAC_REG_PARTIAL_XFER_ID:
  		return true;
-@@ -948,6 +1186,40 @@ static int axi_dmac_probe(struct platform_device *pdev)
+@@ -948,6 +1194,40 @@ static int axi_dmac_probe(struct platform_device *pdev)
  
  	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
  
@@ -481,7 +489,7 @@ index 5161b73..34705be 100644
 +			pdev->dev.dma_mem = axi_dmac_ths_nc_pool;
 +			dev_info(&pdev->dev, "reusing shared Theshire NC DMA pool\n");
 +		}
-+		axi_dmac_ths_nc_pool_users++;
++		atomic_inc(&axi_dmac_ths_nc_pool_users);
 +	} else {
 +		ret = of_reserved_mem_device_init(&pdev->dev);
 +		if (ret == -ENODEV) {
@@ -495,7 +503,7 @@ index 5161b73..34705be 100644
  	dma_dev = &dmac->dma_dev;
  	dma_cap_set(DMA_SLAVE, dma_dev->cap_mask);
  	dma_cap_set(DMA_CYCLIC, dma_dev->cap_mask);
-@@ -956,6 +1228,7 @@ static int axi_dmac_probe(struct platform_device *pdev)
+@@ -956,6 +1236,7 @@ static int axi_dmac_probe(struct platform_device *pdev)
  	dma_dev->device_tx_status = dma_cookie_status;
  	dma_dev->device_issue_pending = axi_dmac_issue_pending;
  	dma_dev->device_prep_slave_sg = axi_dmac_prep_slave_sg;
@@ -503,7 +511,7 @@ index 5161b73..34705be 100644
  	dma_dev->device_prep_dma_cyclic = axi_dmac_prep_dma_cyclic;
  	dma_dev->device_prep_interleaved_dma = axi_dmac_prep_interleaved;
  	dma_dev->device_terminate_all = axi_dmac_terminate_all;
-@@ -972,16 +1245,37 @@ static int axi_dmac_probe(struct platform_device *pdev)
+@@ -972,16 +1253,37 @@ static int axi_dmac_probe(struct platform_device *pdev)
  	vchan_init(&dmac->chan.vchan, dma_dev);
  
  	ret = axi_dmac_detect_caps(dmac, version);
@@ -545,13 +553,13 @@ index 5161b73..34705be 100644
  
  	ret = of_dma_controller_register(pdev->dev.of_node,
  		of_dma_xlate_by_chan_id, dma_dev);
-@@ -1010,6 +1304,17 @@ err_unregister_of:
+@@ -1010,6 +1312,17 @@ err_unregister_of:
  	of_dma_controller_free(pdev->dev.of_node);
  err_unregister_device:
  	dma_async_device_unregister(&dmac->dma_dev);
 +err_reserved_mem:
 +	if (axi_dmac_use_ths_nc_pool()) {
-+		if (--axi_dmac_ths_nc_pool_users == 0) {
++		if (atomic_dec_and_test(&axi_dmac_ths_nc_pool_users)) {
 +			dma_release_declared_memory(&pdev->dev);
 +			axi_dmac_ths_nc_pool = NULL;
 +		} else {
@@ -563,12 +571,12 @@ index 5161b73..34705be 100644
  err_clk_disable:
  	clk_disable_unprepare(dmac->clk);
  
-@@ -1024,6 +1329,16 @@ static int axi_dmac_remove(struct platform_device *pdev)
+@@ -1024,6 +1337,16 @@ static int axi_dmac_remove(struct platform_device *pdev)
  	free_irq(dmac->irq, dmac);
  	tasklet_kill(&dmac->chan.vchan.task);
  	dma_async_device_unregister(&dmac->dma_dev);
 +	if (axi_dmac_use_ths_nc_pool()) {
-+		if (--axi_dmac_ths_nc_pool_users == 0) {
++		if (atomic_dec_and_test(&axi_dmac_ths_nc_pool_users)) {
 +			dma_release_declared_memory(&pdev->dev);
 +			axi_dmac_ths_nc_pool = NULL;
 +		} else {
