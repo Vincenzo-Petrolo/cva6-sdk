@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..cbc583b
+index 0000000..d4f780b
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0xb85f6df
++#define GIT_REV 0x78dcb5e
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..8e51d12
@@ -1064,12 +1064,11 @@ index 0000000..1a633d5
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/pre_def.h b/drivers/pre_def.h
 new file mode 100644
-index 0000000..2d75bf3
+index 0000000..d39223a
 --- /dev/null
 +++ b/drivers/pre_def.h
-@@ -0,0 +1,2 @@
+@@ -0,0 +1 @@
 +#define ENABLE_RX_SCAN_ALL_SLOTS 1
-+#define DEBUG_OPENWIFI
 diff --git a/drivers/rx_intf/rx_intf.c b/drivers/rx_intf/rx_intf.c
 new file mode 100644
 index 0000000..79bd212
@@ -4729,10 +4728,10 @@ index 0000000..a0acf60
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..f9275e4
+index 0000000..a78bcc8
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1201 @@
+@@ -0,0 +1,1203 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -5434,9 +5433,11 @@ index 0000000..f9275e4
 +  int n_ms = clamp(rx_callback_fallback_n_ms, OW_RX_CB_FALLBACK_N_MS_MIN, OW_RX_CB_FALLBACK_N_MS_MAX);
 +
 +  OW_U32_INC(priv->rx_dma_cb_count);
++#ifdef DEBUG_OPENWIFI
 +  if ((priv->rx_dma_cb_count & OW_RX_CB_LOG_EVERY_MASK) == 1U) {
 +    openwifi_rx_dma_log_regs(priv, "rx_dma_callback");
 +  }
++#endif
 +  fallback_period_jiffies = msecs_to_jiffies(n_ms);
 +
 +  /* Fallback trigger rule:
@@ -5787,7 +5788,7 @@ index 0000000..f9275e4
 +    OW_U32_INC(priv->rx_invalid_header_count);
 +    if (printk_timed_ratelimit(&priv->rx_invalid_warn_jiffies,
 +        clamp(rx_invalid_warn_interval_ms, OW_WARN_INTERVAL_MS_MIN, OW_WARN_INTERVAL_MS_MAX))) {
-+      printk("%s openwifi_rx: WARNING content! len%d overflow%d rate_idx%d (total=%u)\n",
++      printk(KERN_DEBUG "%s openwifi_rx: WARNING content! len%d overflow%d rate_idx%d (total=%u)\n",
 +        sdr_compatible_str, len, len_overflow, rate_idx, priv->rx_invalid_header_count);
 +    }
 +    ow_rx_slot_flag_clear_release(pdata_tmp);

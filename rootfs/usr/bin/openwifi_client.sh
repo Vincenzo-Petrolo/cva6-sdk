@@ -140,7 +140,16 @@ connect_iface() {
 
   wpa_supplicant -B -i "$iface" -c "$conf_path" -P "$pid_path" -C "$ctrl_dir"
   wait_for_association "$iface" "$ctrl_dir"
-  udhcpc -i "$iface" -q -n
+
+  # Wait for carrier — mac80211 carrier-on is async and delayed on 100MHz CVA6.
+  # Without this, first udhcpc attempt hits NO-CARRIER window and fails.
+  echo "Waiting for carrier on ${iface}..."
+  for _ in 1 2 3 4 5; do
+    [ "$(cat /sys/class/net/${iface}/carrier 2>/dev/null)" = "1" ] && break
+    sleep 1
+  done
+
+  udhcpc -i "$iface" -q -n -t 5
 }
 
 status_iface() {
