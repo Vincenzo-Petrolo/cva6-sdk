@@ -1534,10 +1534,10 @@ index 0000000..79bd212
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/sdr.c b/drivers/sdr.c
 new file mode 100644
-index 0000000..2d0104f
+index 0000000..8531aa1
 --- /dev/null
 +++ b/drivers/sdr.c
-@@ -0,0 +1,1657 @@
+@@ -0,0 +1,1665 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu, Jetmir Haxhibeqiri, Pablo Avila Campos
 +// SPDX-FileCopyrightText: 2022 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -2644,6 +2644,11 @@ index 0000000..2d0104f
 +  ieee80211_hw_set(dev, REPORTS_TX_ACK_STATUS);
 +  ieee80211_hw_set(dev, AP_LINK_PS);
 +  if (AGGR_ENABLE) {
++    /* TODO(openwifi-ampdu-hw-flag): AMPDU_AGGREGATION is advertised, but
++     * IEEE80211_AMPDU_RX_START/STOP are not wired to XPU_REG_AMPDU_ACTION
++     * (see openwifi_ampdu_action() RX_START/RX_STOP cases — they just printk). Block ACK RX session
++     * management is incomplete. This flag should be gated on complete BA
++     * implementation, or at minimum documented as TX-only aggregation. */
 +    ieee80211_hw_set(dev, AMPDU_AGGREGATION);
 +  }
 +  ieee80211_hw_set(dev, SIGNAL_DBM);
@@ -2771,6 +2776,9 @@ index 0000000..2d0104f
 +  printk("%s openwifi_dev_probe: mac_addr %02x:%02x:%02x:%02x:%02x:%02x\n",
 +    sdr_compatible_str, priv->mac_addr[0], priv->mac_addr[1], priv->mac_addr[2], priv->mac_addr[3], priv->mac_addr[4], priv->mac_addr[5]);
 +  SET_IEEE80211_PERM_ADDR(dev, priv->mac_addr);
++  /* Cache pre-parsed MAC parts for fast per-packet own-MAC check in RX. */
++  priv->own_mac_high16 = get_unaligned_le16(priv->mac_addr);
++  priv->own_mac_low32 = get_unaligned_le32(priv->mac_addr + 2);
 +}
 +
 +/**
@@ -3197,10 +3205,10 @@ index 0000000..2d0104f
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..7ffbbad
+index 0000000..8876a89
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,953 @@
+@@ -0,0 +1,955 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -4057,6 +4065,8 @@ index 0000000..7ffbbad
 +  u32 slice_idx;
 +  u32 dest_mac_addr_queue_map[MAX_NUM_HW_QUEUE];
 +  u8  mac_addr[ETH_ALEN];
++  u16 own_mac_high16; /* cached MAC[0..1] for fast RX own-MAC check */
++  u32 own_mac_low32;  /* cached MAC[2..5] for fast RX own-MAC check */
 +  u16 seqno;
 +
 +  bool use_short_slot;
@@ -4156,10 +4166,10 @@ index 0000000..7ffbbad
 +#endif /* OPENWIFI_SDR */
 diff --git a/drivers/sdr_mac_ops.c b/drivers/sdr_mac_ops.c
 new file mode 100644
-index 0000000..a0acf60
+index 0000000..ac03342
 --- /dev/null
 +++ b/drivers/sdr_mac_ops.c
-@@ -0,0 +1,634 @@
+@@ -0,0 +1,638 @@
 +/**
 + * @file sdr_mac_ops.c
 + * @brief mac80211 operation callbacks for the OpenWiFi SDR driver.
@@ -4203,7 +4213,9 @@ index 0000000..a0acf60
 +#define OW_FILTER_FIF_FCSFAIL_SHIFT          2U  /* RTL pkt_filter_ctl.v: 14'b00000000000100 */
 +#define OW_FILTER_FIF_PLCPFAIL_SHIFT         3U  /* RTL pkt_filter_ctl.v: 14'b00000000001000 */
 +#define OW_FILTER_FIF_ALLMULTI_SHIFT         1U
-+#define OW_AMPDU_DENSITY_SHIFT               24U
++/* RTL tx_bit_intf.v:237 reads density from ampdu_action_config[24:22] (LSB=22).
++ * Was incorrectly 24U — caused 2-bit mismatch for all non-zero density values. */
++#define OW_AMPDU_DENSITY_SHIFT               22U
 +#define OW_AMPDU_BUF_SIZE_SHIFT              16U
 +#define OW_BSSID_LOW_SHIFT_1                 8U
 +#define OW_BSSID_LOW_SHIFT_2                 16U
@@ -4397,6 +4409,8 @@ index 0000000..a0acf60
 +  vif_priv->enable_beacon = false;
 +
 +  ether_addr_copy(priv->mac_addr, vif->addr);
++  priv->own_mac_high16 = get_unaligned_le16(priv->mac_addr);
++  priv->own_mac_low32 = get_unaligned_le32(priv->mac_addr + 2);
 +  xpu_api->XPU_REG_MAC_ADDR_write(priv->mac_addr);
 +
 +  printk("%s openwifi_add_interface end with vif idx %d addr %pM\n",
@@ -4499,23 +4513,23 @@ index 0000000..a0acf60
 +  }
 +
 +  if (changed & BSS_CHANGED_BEACON_INT) {
-+    printk("%s openwifi_bss_info_changed WARNING BSS_CHANGED_BEACON_INT %x\n", sdr_compatible_str, info->beacon_int);
++    printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed BSS_CHANGED_BEACON_INT %x\n", sdr_compatible_str, info->beacon_int);
 +  }
 +
 +  if (changed & BSS_CHANGED_TXPOWER) {
-+    printk("%s openwifi_bss_info_changed WARNING BSS_CHANGED_TXPOWER %x\n", sdr_compatible_str, info->txpower);
++    printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed BSS_CHANGED_TXPOWER %x\n", sdr_compatible_str, info->txpower);
 +  }
 +
 +  if (changed & BSS_CHANGED_ERP_CTS_PROT) {
-+    printk("%s openwifi_bss_info_changed WARNING BSS_CHANGED_ERP_CTS_PROT %x\n", sdr_compatible_str, info->use_cts_prot);
++    printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed BSS_CHANGED_ERP_CTS_PROT %x\n", sdr_compatible_str, info->use_cts_prot);
 +  }
 +
 +  if (changed & BSS_CHANGED_BASIC_RATES) {
-+    printk("%s openwifi_bss_info_changed WARNING BSS_CHANGED_BASIC_RATES %x\n", sdr_compatible_str, info->basic_rates);
++    printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed BSS_CHANGED_BASIC_RATES %x\n", sdr_compatible_str, info->basic_rates);
 +  }
 +
 +  if (changed & (BSS_CHANGED_ERP_SLOT | BSS_CHANGED_ERP_PREAMBLE)) {
-+    printk("%s openwifi_bss_info_changed WARNING BSS_CHANGED_ERP_SLOT %d BSS_CHANGED_ERP_PREAMBLE %d short slot %d\n", sdr_compatible_str,
++    printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed BSS_CHANGED_ERP_SLOT %d BSS_CHANGED_ERP_PREAMBLE %d short slot %d\n", sdr_compatible_str,
 +      changed & BSS_CHANGED_ERP_SLOT, changed & BSS_CHANGED_ERP_PREAMBLE, info->use_short_slot);
 +    new_short_slot = !!info->use_short_slot;
 +    if (new_short_slot != priv->use_short_slot) {
@@ -4528,7 +4542,7 @@ index 0000000..a0acf60
 +  }
 +
 +  if (changed & BSS_CHANGED_BEACON_ENABLED) {
-+    printk("%s openwifi_bss_info_changed WARNING BSS_CHANGED_BEACON_ENABLED\n", sdr_compatible_str);
++    printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed BSS_CHANGED_BEACON_ENABLED\n", sdr_compatible_str);
 +    vif_priv->enable_beacon = info->enable_beacon;
 +  }
 +
@@ -4536,9 +4550,9 @@ index 0000000..a0acf60
 +    cancel_delayed_work_sync(&vif_priv->beacon_work);
 +    if (vif_priv->enable_beacon) {
 +      schedule_delayed_work(&vif_priv->beacon_work, 0);
-+      printk("%s openwifi_bss_info_changed WARNING enable_beacon\n", sdr_compatible_str);
++      printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed enable_beacon\n", sdr_compatible_str);
 +    }
-+    printk("%s openwifi_bss_info_changed WARNING BSS_CHANGED_BEACON_ENABLED %d BSS_CHANGED_BEACON %d\n", sdr_compatible_str,
++    printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed BSS_CHANGED_BEACON_ENABLED %d BSS_CHANGED_BEACON %d\n", sdr_compatible_str,
 +      changed & BSS_CHANGED_BEACON_ENABLED, changed & BSS_CHANGED_BEACON);
 +  }
 +}
@@ -4627,7 +4641,7 @@ index 0000000..a0acf60
 +static u64 openwifi_prepare_multicast(struct ieee80211_hw *dev, struct netdev_hw_addr_list *mc_list)
 +{
 +  (void)dev;
-+  printk("%s openwifi_prepare_multicast\n", sdr_compatible_str);
++  printk_ratelimited(KERN_DEBUG "%s openwifi_prepare_multicast\n", sdr_compatible_str);
 +  return netdev_hw_addr_list_count(mc_list);
 +}
 +
@@ -4796,10 +4810,10 @@ index 0000000..a0acf60
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..f5bfb23
+index 0000000..f43472f
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1394 @@
+@@ -0,0 +1,1391 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -4866,7 +4880,7 @@ index 0000000..f5bfb23
 + *         HPDCache uses 64B lines — if HPDCache is adopted, 64 cbo.inval.
 + *         Expose via riscv_cbom_block_size in DT or CSR enumerator.
 + *
-+ *   2. Kernel (5.19+ or backport to 5.15):
++ *   2. Kernel (6.0+ or backport to 5.15):
 + *      a. CONFIG_RISCV_ISA_ZICBOM=y — enables arch/riscv/mm/dma-noncoherent.c
 + *         which implements dma_sync_*_for_cpu via cbo.inval loops.
 + *      b. DTS: remove DMA devices from reserved-memory NC pool (undo PMA NC
@@ -4875,9 +4889,9 @@ index 0000000..f5bfb23
 + *         and use cached + cbo.inval for RX only.
 + *      c. ARCH_HAS_SYNC_DMA_FOR_DEVICE + ARCH_HAS_SYNC_DMA_FOR_CPU must be
 + *         selected — these are the Kconfig symbols that enable the non-coherent
-+ *         DMA path on RISC-V (broken/missing in 5.15, fixed in 5.19).
++ *         DMA path on RISC-V (broken/missing in 5.15, fixed in 6.0).
 + *      d. If backporting to 5.15: cherry-pick the riscv non-coherent DMA
-+ *         series (commits around v5.19-rc1, Palmer Dabbelt / Christoph Hellwig).
++ *         series (merged in v6.0; Palmer Dabbelt / Christoph Hellwig).
 + *
 + *   3. OpenWiFi driver (this file):
 + *      a. Remove PMA NC workaround: let dma_alloc_coherent return cached buffer.
@@ -4906,7 +4920,7 @@ index 0000000..f5bfb23
 + *                      bitstream with `make vivado-fpga-synth-zcu104` (theshire)
 + *                      or openwifi-hw `make build-rtl PLATFORM=theshire`.
 + *     Layer 2 (Kernel): theshire repo — sw/deps/cva6-sdk/ (defconfig + patches).
-+ *                      May need kernel 5.19+ or backport patches in linux_patch/.
++ *                      May need kernel 6.0+ or backport patches in linux_patch/.
 + *     Layer 3 (Driver): openwifi repo — driver/sdr_rx.c (this file).  Edit here,
 + *                      then regen patch via `util/regen_openwifi_patch.sh`.
 + *
@@ -5012,29 +5026,6 @@ index 0000000..f5bfb23
 +}
 +
 +/**
-+ * @brief Clear RX slot packet marker with release ordering for DMA producer.
-+ *
-+ * Pairing intent:
-+ * - Consumer side reads packet metadata/payload after dma_rmb().
-+ * - Before handing ownership back to hardware, publish the clear marker with
-+ *   dma_wmb() so prior CPU reads/writes are not reordered after the marker.
-+ *
-+ * @param slot_base RX slot start pointer.
-+ */
-+static inline void ow_rx_slot_flag_clear_release(u8 *slot_base)
-+{
-+  /* dma_wmb() is the correct barrier here — CPU→device write ordering only.
-+   * Sequence: CPU reads slot metadata/payload (all NC, no cache) → dma_wmb()
-+   * → CPU writes pkt-exist flag to zero → DMA engine sees cleared slot.
-+   * No dma_mb() needed: all CPU reads from this slot preceded this function
-+   * call, and PMA NC (CVA6) / device mapping (ARM) means no stale-cache
-+   * concern for the read side.  dma_mb() would add a redundant device→CPU
-+   * barrier. */
-+  dma_wmb();
-+  ow_rx_slot_flag_clear(slot_base);
-+}
-+
-+/**
 + * @brief Decode MAC address bytes into high16/low32 words.
 + *
 + * @param mac_addr Pointer to 6-byte MAC address.
@@ -5069,11 +5060,7 @@ index 0000000..f5bfb23
 + */
 +static inline bool ow_rx_is_own_mac(const struct openwifi_priv *priv, u16 addr_high16, u32 addr_low32)
 +{
-+  u16 own_high16;
-+  u32 own_low32;
-+
-+  ow_rx_get_mac_parts(priv->mac_addr, &own_high16, &own_low32);
-+  return (addr_low32 == own_low32) && (addr_high16 == own_high16);
++  return (addr_low32 == priv->own_mac_low32) && (addr_high16 == priv->own_mac_high16);
 +}
 +
 +/**
@@ -5759,7 +5746,7 @@ index 0000000..f5bfb23
 + *       (see openwifi-hw: flows/rtl/theshire/archived/.../ps_ddr_bridge.tcl,
 + *        docs/specs/spec_dma_subsystem.md lines 62-66,
 + *        rtl/theshire/theshire_wrapper.sv lines 560-673)
-+ *   SW: dma_alloc_coherent() on RISC-V in kernels before 5.19 does NOT
++ *   SW: dma_alloc_coherent() on RISC-V in kernels before 6.0 does NOT
 + *       set non-cacheable mapping (ARCH_HAS_DMA_SET_UNCACHED not selected
 + *       by arch/riscv). Buffer is CACHED in CVA6's write-through L1.
 + *       DMA writes update the LLC, but CVA6's L1 D-cache is not expected
@@ -5797,7 +5784,7 @@ index 0000000..f5bfb23
 + *   - Zicbom cbo.inval: not implemented in CVA6 decoder (decoder.sv:
 + *     452-466 decodes funct3=010 as illegal). HPDCache CMO ports exist
 + *     as stubs (cva6.sv:1513-1536 FIXME). Would need decoder + pipeline
-+ *     + cache wiring in RTL, plus kernel 5.19+ (Zicbom merged upstream).
++ *     + cache wiring in RTL, plus kernel 6.0+ (Zicbom merged upstream).
 + *   - Kernel DMA API is broken on RISC-V 5.15: dev_is_dma_coherent()
 + *     hardcoded true (dma-map-ops.h:249-261, none of ARCH_HAS_SYNC_DMA
 + *     symbols selected). dma_alloc_coherent returns normal cached ptr.
@@ -5809,7 +5796,7 @@ index 0000000..f5bfb23
 + *   DTS reserved-memory node binds DMA devices to NC pool via
 + *   of_reserved_mem_device_init() in dma-axi-dmac.c.
 + *   See docs/todo/todo_dma_cache_coherency.md for full investigation.
-+ *   Long-term: Zicbom in CVA6 + kernel 5.19+ for standard RISC-V
++ *   Long-term: Zicbom in CVA6 + kernel 6.0+ for standard RISC-V
 + *   non-coherent DMA (arch/riscv/mm/dma-noncoherent.c with cbo.inval).
 + *   See also: theshire docs/specs/spec_dma_subsystem.md.
 + */
@@ -5825,14 +5812,15 @@ index 0000000..f5bfb23
 + *   rx_slot_claimed[] to prevent double-consume by concurrent IRQ/callback.
 + *
 + * Phase RX-B (unlocked, IRQs enabled):
-+ *   For each claimed slot: dma_rmb(), parse metadata, validate, dev_alloc_skb(),
-+ *   skb_put_data() (memcpy from NC DMA buffer), fill rx_status, call
++ *   One batch dma_rmb() before the loop, then for each claimed slot: parse
++ *   metadata, validate, dev_alloc_skb(), skb_put_data() (memcpy from NC DMA
++ *   buffer), fill rx_status directly in IEEE80211_SKB_RXCB(skb), call
 + *   ieee80211_rx_irqsafe(), update telemetry stats.
 + *   TX DMA completion IRQs can fire during this phase — breaking the death
 + *   spiral that previously collapsed throughput on single-core.
 + *
 + * Phase RX-C (short, locked):
-+ *   Clear DMA slot flags (release ordering via dma_wmb), clear rx_slot_claimed[],
++ *   One batch dma_wmb() before the loop, then clear DMA slot flags, clear rx_slot_claimed[],
 + *   advance ring index (sequential mode), increment ampdu_reference for
 + *   ht_aggr_last slots in order.
 + *
@@ -5856,7 +5844,7 @@ index 0000000..f5bfb23
 +  u32 local_ampdu_ref = 0;
 +  u32 i;
 +  /* Phase RX-B per-slot locals. */
-+  struct ieee80211_rx_status rx_status;
++  struct ieee80211_rx_status *rxcb;
 +  struct sk_buff *skb;
 +  struct ieee80211_hdr *hdr;
 +  u32 addr1_low32, addr2_low32 = 0, addr3_low32 = 0, len, rate_idx, tsft_low, tsft_high;
@@ -5869,7 +5857,7 @@ index 0000000..f5bfb23
 +  u16 addr1_high16;
 +  u16 addr2_high16 = 0, addr3_high16 = 0;
 +  u16 seq_no = 0;
-+  bool content_ok, len_overflow, is_unicast;
++  bool content_ok = false, len_overflow, is_unicast;
 +  int rx_slot_idx_for_log;
 +
 +  /* Always-on counter distinguishing real IRQ (irq != 0) from
@@ -5986,15 +5974,29 @@ index 0000000..f5bfb23
 +   * Phase RX-B: unlocked — parse, validate, alloc skb, mac80211 handoff.
 +   * IRQs are enabled; TX DMA completion can fire during this phase.
 +   * ================================================================= */
++
++  /* One dma_rmb() suffices for the entire batch — all DMA writes for all
++   * claimed slots completed before Phase RX-A observed their flags as non-zero.
++   * Ordering: FPGA writes header (including pkt_exist flag) FIRST, then payload
++   * data (rx_intf_pl_to_m_axis.v DMA_HEADER1_INSERT_AND_START → WAIT_FILTER_FLAG).
++   * The ADI DMAC S2MM transfer completes atomically per period — TLAST marks the
++   * end of each slot's data, and the DMA callback/IRQ fires only after the full
++   * transfer lands in memory.  Phase RX-A runs post-callback, so by the time it
++   * observes flag != 0, ALL bytes (header + payload) for that slot are in memory.
++   * dma_rmb() here ensures the CPU's memory ordering respects this: payload reads
++   * in Phase RX-B cannot be speculatively reordered before the flag check. */
++  dma_rmb();
++
 +  for (i = 0; i < n_claimed; i++) {
 +  rx_slot_idx_for_log = (int)work[i].slot_idx;
 +  pdata_tmp = priv->rx_cyclic_buf + work[i].slot_idx * RX_BD_BUF_SIZE;
 +  agc_status_and_pkt_exist_flag = work[i].agc_flag;
 +
-+  /* DMA-to-CPU ordering barrier.  ARM NC mapping and CVA6 PMA NC region
-+   * both make dma_rmb() the sole required barrier.  See git history of this
-+   * function for the full 4-variant coherency analysis. */
-+  dma_rmb();
++  /* Reset per-slot debug variables so short frames don't log stale values
++   * from a previous iteration (addr2/addr3/seq_no are conditionally set). */
++  addr2_high16 = 0; addr2_low32 = 0;
++  addr3_high16 = 0; addr3_low32 = 0;
++  seq_no = 0;
 +
 +  tsft_low = ow_rx_read_u32(pdata_tmp, OW_RX_META_OFF_TSFT_LOW_BYTES);
 +  tsft_high = ow_rx_read_u32(pdata_tmp, OW_RX_META_OFF_TSFT_HIGH_BYTES);
@@ -6070,49 +6072,49 @@ index 0000000..f5bfb23
 +    skb = dev_alloc_skb(len);
 +    if (skb) {
 +      skb_put_data(skb, pdata_tmp + OW_RX_META_HEADER_BYTES, len);
-+      memset(&rx_status, 0, sizeof(rx_status));
++      rxcb = IEEE80211_SKB_RXCB(skb);
++      memset(rxcb, 0, sizeof(*rxcb));
 +
-+      rx_status.antenna = priv->runtime_rx_ant_cfg;
++      rxcb->antenna = priv->runtime_rx_ant_cfg;
 +      /* rate_idx has already been validated against OW_RX_RATE_IDX_MIN_VALID/MAX_VALID. */
-+      rx_status.rate_idx = wifi_rate_table_mapping[rate_idx];
-+      rx_status.signal = signal;
++      rxcb->rate_idx = wifi_rate_table_mapping[rate_idx];
++      rxcb->signal = signal;
 +      /* Report legal channel center frequency to mac80211 RX metadata.
 +       * priv->actual_rx_lo can be intentionally offset for DDC operation
 +       * (for example +/-10 MHz), so LO is not valid channel metadata. */
 +      if (dev->conf.chandef.chan) {
-+        rx_status.freq = dev->conf.chandef.chan->center_freq;
-+        rx_status.band = dev->conf.chandef.chan->band;
++        rxcb->freq = dev->conf.chandef.chan->center_freq;
++        rxcb->band = dev->conf.chandef.chan->band;
 +      } else {
-+        rx_status.freq = priv->actual_rx_lo;
-+        rx_status.band = freq_MHz_to_band(priv->actual_rx_lo);
++        rxcb->freq = priv->actual_rx_lo;
++        rxcb->band = freq_MHz_to_band(priv->actual_rx_lo);
 +      }
 +
-+      rx_status.mactime = (((u64)tsft_low) | (((u64)tsft_high) << OW_RX_TSFT_HIGH_SHIFT));
-+      rx_status.flag |= RX_FLAG_MACTIME_START;
++      rxcb->mactime = (((u64)tsft_low) | (((u64)tsft_high) << OW_RX_TSFT_HIGH_SHIFT));
++      rxcb->flag |= RX_FLAG_MACTIME_START;
 +      if (!fcs_ok) {
-+        rx_status.flag |= RX_FLAG_FAILED_FCS_CRC;
++        rxcb->flag |= RX_FLAG_FAILED_FCS_CRC;
 +      }
 +      if (rate_idx <= OW_RX_RATE_LEGACY_MAX_VALID) {
-+        rx_status.encoding = RX_ENC_LEGACY;
++        rxcb->encoding = RX_ENC_LEGACY;
 +      } else {
-+        rx_status.encoding = RX_ENC_HT;
++        rxcb->encoding = RX_ENC_HT;
 +      }
-+      rx_status.bw = RATE_INFO_BW_20;
++      rxcb->bw = RATE_INFO_BW_20;
 +      if (short_gi) {
-+        rx_status.enc_flags |= RX_ENC_FLAG_SHORT_GI;
++        rxcb->enc_flags |= RX_ENC_FLAG_SHORT_GI;
 +      }
 +      if (ht_aggr) {
-+        rx_status.ampdu_reference = local_ampdu_ref;
-+        rx_status.flag |= RX_FLAG_AMPDU_DETAILS | RX_FLAG_AMPDU_LAST_KNOWN;
++        rxcb->ampdu_reference = local_ampdu_ref;
++        rxcb->flag |= RX_FLAG_AMPDU_DETAILS | RX_FLAG_AMPDU_LAST_KNOWN;
 +        if (ht_aggr_last) {
-+          rx_status.flag |= RX_FLAG_AMPDU_IS_LAST;
++          rxcb->flag |= RX_FLAG_AMPDU_IS_LAST;
 +        }
 +      }
 +
-+      memcpy(IEEE80211_SKB_RXCB(skb), &rx_status, sizeof(rx_status));
 +      ieee80211_rx_irqsafe(dev, skb);
 +
-+      if (ow_rx_is_own_mac(priv, addr1_high16, addr1_low32) && priv->stat.stat_enable) {
++      if (priv->stat.stat_enable && ow_rx_is_own_mac(priv, addr1_high16, addr1_low32)) {
 +        agc_status_and_pkt_exist_flag = (agc_status_and_pkt_exist_flag & OW_RX_AGC_VALUE_MASK);
 +        if (len >= OW_IEEE80211_ADDR2_MIN_LEN_BYTES) {
 +          if (ow_rx_sender_filter_match(addr2_high16, addr2_low32, priv->stat.rx_target_sender_mac_addr_high16,
@@ -6150,7 +6152,7 @@ index 0000000..f5bfb23
 +        }
 +      }
 +    } else {
-+      printk("%s openwifi_rx: WARNING dev_alloc_skb failed!\n", sdr_compatible_str);
++      printk_ratelimited(KERN_WARNING "%s openwifi_rx: WARNING dev_alloc_skb failed!\n", sdr_compatible_str);
 +    }
 +
 +    /* NOTE: ampdu_ref advances even on alloc failure — pre-existing behavior.
@@ -6165,10 +6167,19 @@ index 0000000..f5bfb23
 +   * Phase RX-C: locked, short — release slots, advance ring, update ampdu_ref.
 +   * ================================================================= */
 +  spin_lock_irqsave(&priv->lock, flags);
++
++  /* dma_wmb() orders CPU writes before the slot-flag clears that follow.
++   * The spinlock acquire above already provides read-before-write ordering
++   * (Phase B reads from DMA buffer → Phase C writes slot flags), so this
++   * barrier is belt-and-suspenders for the write→write path: any Phase B
++   * stores (e.g., ampdu_ref writeback at end of this block) are visible
++   * before slot flags are cleared and the DMA engine can reuse the slots. */
++  dma_wmb();
++
 +  for (i = 0; i < n_claimed; i++) {
 +    pdata_tmp = priv->rx_cyclic_buf + work[i].slot_idx * RX_BD_BUF_SIZE;
 +
-+    ow_rx_slot_flag_clear_release(pdata_tmp);
++    ow_rx_slot_flag_clear(pdata_tmp);
 +    priv->rx_slot_claimed[work[i].slot_idx] = 0U;
 +
 +#ifndef ENABLE_RX_SCAN_ALL_SLOTS
@@ -6196,10 +6207,10 @@ index 0000000..f5bfb23
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..a09a944
+index 0000000..f49ef1d
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,1826 @@
+@@ -0,0 +1,1833 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -6221,8 +6232,8 @@ index 0000000..a09a944
 +/*
 + * TODO(openwifi-tx-completion-irq): Replace TX pre-submit udelay polling with
 + *   completion interrupt.  Each TX packet busy-waits up to tx_dma_wait_us
-+ *   (default 100 us on CVA6, 1000 us on Zynq) for DMA completion.  At 100 MHz
-+ *   CVA6, 100 us = 10K wasted cycles per packet worst case.  The TX DMA engine
++ *   (default 1000 us, sdr.c:205; S80openwifi overrides to 100 us on CVA6) for
++ *   DMA completion.  At 100 MHz CVA6, 100 us = 10K wasted cycles worst case.  The TX DMA engine
 + *   already has IRQ support — use a completion-based submit flow instead.
 + *   struct completion tx_dma_complete exists in sdr.h (commented out) but
 + *   was never wired up.  Note: wait_for_completion is illegal from softirq
@@ -7399,12 +7410,12 @@ index 0000000..a09a944
 +  void *bounce_buf = NULL; /* aligned DMA bounce buffer when source is unaligned */
 +  bool tx_submit_locked = false;
 +
++  len_mpdu = skb->len;
++
 +  if (skb->data_len > 0) { /* non-linear payload is unsupported on this TX path */
 +    printk("%s openwifi_tx: WARNING skb->data_len>0\n", sdr_compatible_str);
 +    goto openwifi_tx_early_out;
 +  }
-+
-+  len_mpdu = skb->len;
 +
 +  /* Get Linux priority/queue and destination MAC address. */
 +  prio = skb_get_queue_mapping(skb);
@@ -7558,7 +7569,7 @@ index 0000000..a09a944
 +  duration_id = hdr->duration_id;
 +
 +  if (use_rts_cts) {
-+    printk("%s openwifi_tx: WARNING sn %d use_rts_cts is not supported!\n", sdr_compatible_str, ring->bd_wr_idx);
++    printk_ratelimited(KERN_WARNING "%s openwifi_tx: WARNING sn %d use_rts_cts is not supported!\n", sdr_compatible_str, ring->bd_wr_idx);
 +  }
 +
 +  if (use_cts_protect) {
@@ -7734,7 +7745,14 @@ index 0000000..a09a944
 +   * ADI axi_dmac requires 8-byte aligned addresses (adi,source-bus-width=64).
 +   * skb_push(skb, LEN_MPDU_DELIM=4) in the aggregation path shifts data by
 +   * 4 bytes, breaking alignment. Non-aggregation path checked defensively.
-+   * See: dma-axi-dmac.c axi_dmac_check_addr(), address_align_mask=7. */
++   * See: dma-axi-dmac.c axi_dmac_check_addr(), address_align_mask=7.
++   *
++   * NOTE(openwifi-tx-bounce-alignment): extra_tx_headroom (4 bytes, sdr.c)
++   * guarantees headroom space, but NOT post-skb_push() alignment. After
++   * skb_push(LEN_MPDU_DELIM=4), the data pointer shifts by 4 bytes. If the
++   * original skb->data was 8-byte aligned, it becomes 4-byte aligned — failing
++   * the ADI DMA 8-byte requirement. The bounce-buffer path here is REQUIRED
++   * for all AMPDU packets; do NOT remove it thinking headroom solves alignment. */
 +  bounce_buf = NULL;
 +  if ((uintptr_t)dma_buf & OW_TX_DMA_ADDR_ALIGN_MASK) {
 +    bounce_buf = kmalloc(num_dma_byte, GFP_ATOMIC);
@@ -9330,10 +9348,10 @@ index 0000000..23ea11e
 +}
 diff --git a/drivers/side_ch/side_ch.c b/drivers/side_ch/side_ch.c
 new file mode 100644
-index 0000000..15520d0
+index 0000000..6b5c341
 --- /dev/null
 +++ b/drivers/side_ch/side_ch.c
-@@ -0,0 +1,709 @@
+@@ -0,0 +1,706 @@
 +/*
 + * openwifi side channel driver
 + * Author: Xianjun Jiao
@@ -9564,7 +9582,6 @@ index 0000000..15520d0
 +			dst_buf[i] = 0;
 +		}
 +
-+		set_user_nice(current, 10);
 +		flags = DMA_CTRL_ACK | DMA_PREP_INTERRUPT;
 +
 +		src_buf_dma = dma_map_single(chan_to_pl_dev->dev, src_buf, test_buf_size, DMA_MEM_TO_DEV);
@@ -9706,8 +9723,6 @@ index 0000000..15520d0
 +		printk("%s get_side_info WARNING status!=DMA_COMPLETE\n", side_ch_compatible_str);
 +		return(-1);
 +	}
-+
-+	set_user_nice(current, 10);
 +
 +	if (iq_len>0)
 +		num_dma_symbol_per_trans = 1+iq_len;
