@@ -15,7 +15,7 @@
 # Requires bash. Callers set their own error handling (set -euo pipefail).
 # This library does NOT set error handling — it runs under the caller's opts.
 #
-# SPDX-FileCopyrightText: 2026 EPFL-ESL
+# SPDX-FileCopyrightText: 2026 EPFL-TCL
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #==============================================================================
 

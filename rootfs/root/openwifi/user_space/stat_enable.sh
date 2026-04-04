@@ -13,8 +13,4 @@ else
   echo 1 > stat_enable
 fi
 
-# show
-cat stat_enable
-
 cd "$home_dir"
-

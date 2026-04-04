@@ -9,7 +9,7 @@
 #   ./nic_back_to_normal.sh [interface]
 #   ./nic_back_to_normal.sh wlan0
 #
-# SPDX-FileCopyrightText: 2019 UGent (original), 2026 EPFL-ESL (theshire port)
+# SPDX-FileCopyrightText: 2019 UGent (original), 2026 EPFL-TCL (theshire port)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #==============================================================================
 set -eu

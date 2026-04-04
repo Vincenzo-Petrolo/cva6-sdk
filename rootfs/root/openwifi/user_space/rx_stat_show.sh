@@ -5,7 +5,7 @@
 #
 # Usage: ./rx_stat_show.sh [interface]
 #
-# SPDX-FileCopyrightText: 2026 EPFL-ESL
+# SPDX-FileCopyrightText: 2026 EPFL-TCL
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #==============================================================================
 
