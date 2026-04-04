@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..6946f56
+index 0000000..bc56065
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x7dc3db1
++#define GIT_REV 0x0be9a09
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..63e9de1
@@ -1534,10 +1534,10 @@ index 0000000..79bd212
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/sdr.c b/drivers/sdr.c
 new file mode 100644
-index 0000000..8531aa1
+index 0000000..ed1ca7f
 --- /dev/null
 +++ b/drivers/sdr.c
-@@ -0,0 +1,1665 @@
+@@ -0,0 +1,1717 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu, Jetmir Haxhibeqiri, Pablo Avila Campos
 +// SPDX-FileCopyrightText: 2022 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -2336,6 +2336,19 @@ index 0000000..8531aa1
 +  priv->ad9361_phy->state->manual_tx_quad_cal_en = true;
 +  xpu_api->XPU_REG_SPI_DISABLE_write(OW_SPI_DISABLE_DISABLE);
 +
++  /* Defensive WMM CW initialization.  Standard 802.11e AC defaults:
++   * VO=0x32 (CW 3-7), VI=0x43 (CW 7-15), BE=0xA4 (CW 15-1023), BK=0xA4.
++   *
++   * Written unconditionally because:
++   * 1. FPGA resets CSMA_CFG to 0x00000000 (CW=0 for all queues = no backoff)
++   * 2. hw_init() does NOT write CSMA_CFG (xpu.c:446-447 commented out)
++   * 3. conf_tx() fires after association and overwrites with AP WMM params
++   * 4. If AP is non-WMM, conf_tx() writes all-BE (0xA4A4A4A4) — these
++   *    defaults provide correct WMM differentiation before that point */
++  xpu_api->XPU_REG_CSMA_CFG_write(0xA4A44332);
++  printk(KERN_INFO "%s openwifi_start: wrote default WMM CW 0xA4A44332\n",
++    sdr_compatible_str);
++
 +  openwifi_rx_dma_watchdog_arm(priv);
 +
 +  printk("%s openwifi_start: NUM_RX_BD=%d RX_BD_BUF_SIZE=%d NUM_TX_BD=%d\n",
@@ -3090,7 +3103,46 @@ index 0000000..8531aa1
 +
 +  priv->drv_xpu_reg_val[DRV_XPU_REG_IDX_GIT_REV] = GIT_REV;
 +
-+  dev->max_rates = 1; /* Maximum number of alternate rate retry stages hardware handles. */
++  /* DELIBERATE mac80211 contract deviation for research driver:
++   * mac80211.h:2522 documents max_rates as "maximum number of alternate rate
++   * retry stages the hw can handle."  Our FPGA physically retries at ONE rate
++   * (rates[0]); rates[1..3] are never attempted by hardware.
++   *
++   * WHY THIS IS SAFE despite the contract mismatch:
++   * Minstrel fills rates[0..2] before calling openwifi_tx().  The FPGA executes
++   * only rates[0] for rates[0].count attempts.  The TX status path reports:
++   *   rates[0].count = actual_retries,  rates[1].idx = -1  (sdr_tx.c:931)
++   * Minstrel's status handler (minstrel_ht.c:1219-1229) iterates the rates[]
++   * array and calls minstrel_ht_txstat_valid() on each stage.  It returns false
++   * when idx < 0 OR count == 0.  Since rates[1].idx = -1, the loop terminates
++   * after stage 0.  Minstrel counts attempts/success ONLY for stage 0 — no
++   * corruption, no false credit for stages 1-2.
++   *
++   * WHY max_rates=4 (not 1) is better for rate adaptation:
++   *   - has_mrr=true (minstrel_ht.c:1838): enables multi-rate mode
++   *   - 3-stage rate table (minstrel_ht.c:1441-1447): max_tp + max_prob
++   *   - sample rotation (minstrel_ht.c:1460): systematic rate probing
++   *   NOTE: spatial mux downgrade (minstrel_ht.c:1231) requires rate2->attempts
++   *   > 30 on max_tp_rate[1], which never accumulates because rates[1] is never
++   *   attempted.  This benefit is illusory for single-stage HW.
++   * With max_rates=1, minstrel puts ALL retries on one rate — every failure
++   * is 100% failure at that rate, no multi-rate exploration.
++   *
++   * RETRY BUDGET: minstrel_calc_retransmit (minstrel_ht.c:1260-1316) computes
++   * retry_count PER STAGE independently based on segment_size (6000us) and
++   * max_retry (7).  For fast rates (MCS 5-7, ~200us/attempt), retry_count
++   * reaches max_retry=7 because tx_time << segment_size.  For slow rates
++   * (MCS 0, ~2ms/attempt), retry_count is 2-3.  So the FPGA's effective retry
++   * count is rate-dependent, NOT a fixed "~2".  At the high MCS rates where
++   * this optimization matters most, retry_count stays at 7.
++   * MEASURE after deployment: if retry rate is high, consider max_rates=2.
++   *
++   * TODO(openwifi-max-rates-contract): This is a research hack, not a
++   * spec-correct implementation.  To make it proper, the driver would need
++   * to either: (a) implement multi-rate HW retry in FPGA so rates[1..3]
++   * are actually attempted, or (b) set max_rates=1 and find another way to
++   * make minstrel less conservative (e.g., minstrel module parameters). */
++  dev->max_rates = 4;
 +  SET_IEEE80211_DEV(dev, &pdev->dev);
 +  platform_set_drvdata(pdev, dev);
 +
@@ -3205,10 +3257,10 @@ index 0000000..8531aa1
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..3dffef0
+index 0000000..0ef900a
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,962 @@
+@@ -0,0 +1,983 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3251,6 +3303,17 @@ index 0000000..3dffef0
 +  void (*set_chan)(struct ieee80211_hw *, struct ieee80211_conf *);
 +};
 +
++/**
++ * @brief TX buffer descriptor — per-packet state for one DMA ring slot.
++ *
++ * Lifecycle: populated in openwifi_tx() after successful DMA submit,
++ * consumed in openwifi_tx_interrupt() for status reporting and cleanup,
++ * cleared by ow_tx_bd_clear() or the manual clear block in the interrupt.
++ *
++ * The ring uses bd_wr_idx (producer, openwifi_tx) and bd_rd_idx (consumer,
++ * openwifi_tx_interrupt).  A slot with seq_no == OPENWIFI_TX_SEQ_INVALID
++ * is considered empty/invalid.
++ */
 +struct openwifi_buffer_descriptor {
 +  u8 prio;
 +  u16 len_mpdu;
@@ -3258,8 +3321,12 @@ index 0000000..3dffef0
 +  struct sk_buff *skb_linked;
 +  dma_addr_t dma_mapping_addr;
 +  u32 dma_len_bytes;
++  struct ieee80211_tx_rate actual_tx_rate; /* rate actually transmitted (after driver
++                                           * overrides); written in openwifi_tx, read back
++                                           * in openwifi_tx_interrupt for minstrel feedback.
++                                           * 3 bytes packed — fits in 4-byte padding gap
++                                           * before bounce_buf pointer. */
 +  void *bounce_buf; /* aligned bounce buffer (NULL when not used) */
-+  // u32 reserved;
 +};
 +
 +struct openwifi_ring {
@@ -3496,11 +3563,17 @@ index 0000000..3dffef0
 +// Software and RF Register Definitions
 +//=============================================================================
 +
++/* Sysfs TX rate override registers.  Written via drv_tx_reg0..drv_tx_reg3.
++ * Value 0 = disabled (mac80211/minstrel selection used).
++ * Non-zero: low 4 bits = hw_value (4..11 maps to MCS0..7 for HT, or
++ * 6/9/12/18/24/36/48/54 Mbps for legacy).  For HT, bit 4 = force SGI.
++ * When active, actual_tx_rate in the BD captures the overridden rate so
++ * minstrel receives correct feedback via openwifi_tx_interrupt(). */
 +#define MAX_NUM_DRV_REG            8
-+#define DRV_TX_REG_IDX_RATE        0
-+#define DRV_TX_REG_IDX_RATE_HT     1
-+#define DRV_TX_REG_IDX_RATE_VHT    2
-+#define DRV_TX_REG_IDX_RATE_HE     3
++#define DRV_TX_REG_IDX_RATE        0  /* legacy rate override */
++#define DRV_TX_REG_IDX_RATE_HT     1  /* HT rate override (MCS + optional SGI) */
++#define DRV_TX_REG_IDX_RATE_VHT    2  /* (unused — no VHT support) */
++#define DRV_TX_REG_IDX_RATE_HE     3  /* (unused — no HE support) */
 +#define DRV_TX_REG_IDX_ANT_CFG     4
 +#define DRV_TX_REG_IDX_PRINT_CFG   (MAX_NUM_DRV_REG-1)
 +
@@ -6235,10 +6308,10 @@ index 0000000..e1759a5
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..ee9a825
+index 0000000..4e653ba
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,1836 @@
+@@ -0,0 +1,1926 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -6301,8 +6374,12 @@ index 0000000..ee9a825
 +#define OW_TX_LEGACY_PREAMBLE_US   20U
 +#define OW_TX_OFDM_SYMBOL_US        4U
 +#define OW_TX_SIFS_OFDM_US         16U
-+#define OW_TX_HT_AGGR_MCS0         0U
-+#define OW_TX_HT_AGGR_MCS_FALLBACK 1U
++/* FPGA workaround: HT aggregation at MCS0 can wedge the TX core in some
++ * bitstream versions.  All AMPDU frames at MCS0 are bumped to MCS1.
++ * actual_tx_rate in the BD captures the bumped rate so minstrel gets
++ * correct feedback instead of attributing MCS1 results to MCS0. */
++#define OW_TX_HT_AGGR_MCS0         0U  /* MCS0 hw_value */
++#define OW_TX_HT_AGGR_MCS_FALLBACK 1U  /* bump target: MCS1 */
 +#define OW_TX_ACK_6M_US            44U
 +#define OW_TX_MPDU_DELIM_LEN_FIELD_OFFSET 0U
 +#define OW_TX_MPDU_DELIM_CRC_FIELD_OFFSET 2U
@@ -6529,6 +6606,7 @@ index 0000000..ee9a825
 +  bd->skb_linked = NULL;
 +  bd->dma_mapping_addr = 0;
 +  bd->dma_len_bytes = 0;
++  bd->actual_tx_rate.idx = -1;
 +  bd->bounce_buf = NULL;
 +}
 +
@@ -6959,7 +7037,6 @@ index 0000000..ee9a825
 +  struct openwifi_ring *ring, *drv_ring_tmp;
 +  struct sk_buff *skb;
 +  struct ieee80211_tx_info *info;
-+  struct ieee80211_rate *tx_rate;
 +  struct ieee80211_hdr *hdr;
 +  u32 reg_val1, hw_queue_len, reg_val2, dma_fifo_no_room_flag, num_slot_random, cw, loop_count = 0, addr1_low32, mcs_for_sysfs;
 +  u16 seq_no, pkt_cnt, blk_ack_ssn, start_idx;
@@ -7089,6 +7166,11 @@ index 0000000..ee9a825
 +        use_ht_aggr = ((info->flags&IEEE80211_TX_CTL_AMPDU)!=0);
 +        pkt_need_ack = (!(info->flags & IEEE80211_TX_CTL_NO_ACK));
 +        ow_tx_restore_skb_for_status(skb, ring->bds[ring->bd_rd_idx].len_mpdu, use_ht_aggr);
++        /* ieee80211_tx_info_clear_status() clears rates[].count and zeros
++         * everything from ampdu_ack_len onwards, but PRESERVES rates[].idx
++         * and rates[].flags (they share memory with control.rates[] via union).
++         * We overwrite rates[0] with actual_tx_rate below to give minstrel
++         * correct feedback when the driver overrode the mac80211 selection. */
 +        ieee80211_tx_info_clear_status(info);
 +
 +        /* Aggregation packet. */
@@ -7118,15 +7200,8 @@ index 0000000..ee9a825
 +        if (priv->stat.stat_enable && pkt_need_ack
 +            && ow_tx_sender_filter_match(addr1_high16, addr1_low32, priv->stat.rx_target_sender_mac_addr_high16,
 +              priv->stat.rx_target_sender_mac_addr)) {
-+          use_ht_rate = (((info->control.rates[0].flags) & IEEE80211_TX_RC_MCS) != 0);
-+          tx_rate = ieee80211_get_tx_rate(dev, info);
-+          if (!tx_rate) {
-+            printk_ratelimited("%s openwifi_tx_interrupt: missing tx_rate, fallback hw_value=0\n",
-+              sdr_compatible_str);
-+            mcs_for_sysfs = 0;
-+          } else {
-+            mcs_for_sysfs = tx_rate->hw_value;
-+          }
++          use_ht_rate = ((ring->bds[ring->bd_rd_idx].actual_tx_rate.flags & IEEE80211_TX_RC_MCS) != 0);
++          mcs_for_sysfs = (u32)(u8)ring->bds[ring->bd_rd_idx].actual_tx_rate.idx;
 +          if (use_ht_rate) {
 +            mcs_for_sysfs = (mcs_for_sysfs | OW_TX_MCS_SYSFS_HT_FLAG);
 +          }
@@ -7162,7 +7237,10 @@ index 0000000..ee9a825
 +          info->flags |= IEEE80211_TX_STAT_NOACK_TRANSMITTED;
 +        }
 +
-+        /* Report retry count for the primary rate stage used by hardware. */
++        /* Write back actual transmitted rate so minstrel receives correct
++         * feedback when the driver overrode the mac80211-selected rate
++         * (sysfs override or FPGA MCS0->MCS1 workaround). */
++        info->status.rates[0] = ring->bds[ring->bd_rd_idx].actual_tx_rate;
 +        info->status.rates[0].count = nof_retx + 1;
 +        info->status.rates[1].idx = -1;
 +        info->status.antenna = priv->runtime_tx_ant_cfg;
@@ -7200,6 +7278,7 @@ index 0000000..ee9a825
 +        ring->bds[ring->bd_rd_idx].len_mpdu = 0; /* invalid marker */
 +        ring->bds[ring->bd_rd_idx].seq_no = OPENWIFI_TX_SEQ_INVALID;
 +        ring->bds[ring->bd_rd_idx].skb_linked = NULL;
++        ring->bds[ring->bd_rd_idx].actual_tx_rate.idx = -1;
 +        ring->bds[ring->bd_rd_idx].bounce_buf = NULL;
 +        ring->bds[ring->bd_rd_idx].dma_mapping_addr = 0;
 +        ring->bds[ring->bd_rd_idx].dma_len_bytes = 0;
@@ -7466,6 +7545,33 @@ index 0000000..ee9a825
 +    drv_ring_idx = (i >= MAX_NUM_HW_QUEUE ? prio : i); /* fallback when no address matches */
 +  }
 +
++  /* Compute pkt_need_ack early — needed for VO queue promotion below.
++   * Only depends on info->flags which is valid from skb CB at function entry. */
++  pkt_need_ack = (!(info->flags & IEEE80211_TX_CTL_NO_ACK));
++
++  /* Promote small BE unicast frames to VO queue for FPGA CW selection.
++   *
++   * TCP ACKs (~66-100 bytes) land on BE queue (CW 15-1023) via standard
++   * 802.11e WMM mapping (TOS=0 -> AC_BE).  For STA-mode downloads, the
++   * board's dominant TX traffic is TCP ACKs, and wide BE CW causes ~4.5ms
++   * average CSMA backoff per ACK.  VO queue (CW 3-7) reduces this to ~45us.
++   *
++   * Override drv_ring_idx BEFORE the ring pointer is assigned so the BD
++   * lives in the promoted ring (tx_ring[0]/VO).  The FPGA echoes queue_idx
++   * back in PKT_INFO1, and the TX interrupt handler uses it to find the
++   * ring — both must agree, or the interrupt looks in the wrong ring.
++   *
++   * prio (from skb_get_queue_mapping) is a SEPARATE variable — overriding
++   * drv_ring_idx does NOT change prio.  mac80211 stop/wake stays on the
++   * original BE queue.
++   *
++   * Threshold 256 bytes covers TCP ACKs (66B), ARP (42B), DHCP, and other
++   * small control traffic.  Data frames are typically 1000-1500B.
++   * Only applies to unicast requiring ACK, not broadcast. */
++  if (drv_ring_idx == IEEE80211_AC_BE && len_mpdu <= 256 && pkt_need_ack) {
++    drv_ring_idx = IEEE80211_AC_VO;
++  }
++
 +  ring = &(priv->tx_ring[drv_ring_idx]);
 +
 +  /* Worker is mid-terminate -- bail before touching ring or lock. */
@@ -7503,6 +7609,7 @@ index 0000000..ee9a825
 +        ring->bds[j].len_mpdu = 0; /* invalid marker */
 +        ring->bds[j].seq_no = OPENWIFI_TX_SEQ_INVALID;
 +        ring->bds[j].skb_linked = NULL;
++        ring->bds[j].actual_tx_rate.idx = -1;
 +        ring->bds[j].dma_mapping_addr = 0;
 +        ring->bds[j].dma_len_bytes = 0;
 +
@@ -7542,7 +7649,7 @@ index 0000000..ee9a825
 +  }
 +
 +  frame_control = hdr->frame_control;
-+  pkt_need_ack = (!(info->flags & IEEE80211_TX_CTL_NO_ACK));
++  /* pkt_need_ack already set above (moved earlier for VO queue promotion). */
 +
 +  retry_limit_raw = info->control.rates[0].count;
 +
@@ -7558,27 +7665,59 @@ index 0000000..ee9a825
 +  }
 +
 +  /* Get mac80211-selected rate/MCS first. */
-+  tx_rate = ieee80211_get_tx_rate(dev, info);
-+  if (!tx_rate) {
-+    printk_ratelimited("%s openwifi_tx: missing tx_rate from mac80211, drop packet\n",
-+      sdr_compatible_str);
-+    goto openwifi_tx_early_out;
++  /* Rate override chain — 3 stages, applied in order:
++   *
++   * 1. mac80211/minstrel selection: rate_hw_value from rates[0].idx (HT)
++   *    or ieee80211_get_tx_rate()->hw_value (legacy).
++   *
++   * 2. Sysfs debug override (DRV_TX_REG_IDX_RATE / DRV_TX_REG_IDX_RATE_HT):
++   *    When non-zero, forces a specific rate for all data frames.
++   *    Encoding: low 4 bits = hw_value (4..11 for HT = MCS0..7),
++   *    bit 4 = force SGI.  Default 0 = disabled (mac80211 selection used).
++   *
++   * 3. FPGA MCS0-in-AMPDU workaround: HT aggregation at MCS0 wedges the
++   *    TX core in some bitstream versions — bumped to MCS1 unconditionally.
++   *
++   * After all 3 stages, actual_tx_rate is built and stored in the BD so
++   * openwifi_tx_interrupt() can report the correct rate to minstrel.
++   * Without this, minstrel receives stale feedback from stage 1 even
++   * when stages 2 or 3 changed the rate. */
++
++  /* Stage 1: Get mac80211-selected rate.
++   * For HT: rates[0].idx IS the MCS index (0-7) directly.
++   * For legacy: ieee80211_get_tx_rate() maps idx to the bitrates[] table.
++   * Using ieee80211_get_tx_rate() for HT is semantically wrong — it indexes
++   * into the legacy table using MCS index.  It "accidentally works" because
++   * hw_value == array_index in the OpenWiFi rate tables, but would break if
++   * tables change.  Branch explicitly on use_ht_rate for correctness. */
++  if (use_ht_rate) {
++    rate_hw_value = info->control.rates[0].idx;
++  } else {
++    tx_rate = ieee80211_get_tx_rate(dev, info);
++    if (!tx_rate) {
++      printk_ratelimited("%s openwifi_tx: missing tx_rate from mac80211, drop packet\n",
++        sdr_compatible_str);
++      goto openwifi_tx_early_out;
++    }
++    rate_hw_value = tx_rate->hw_value;
 +  }
-+  rate_hw_value = tx_rate->hw_value;
-+  /* Optional driver override:
-+   * - DRV_TX_REG_IDX_RATE: legacy 4..11 -> 6..54 Mbps.
-+   * - DRV_TX_REG_IDX_RATE_HT: HT 4..11 -> MCS0..MCS7 (+ optional SGI flag). */
++
++  /* Stage 2: Sysfs debug override (when non-zero).
++   * HT encoding: low 4 bits = hw_value 4..11 (MCS0..MCS7), bit 4 = SGI.
++   * Values 1-3 are invalid (would underflow after -4). */
 +  if (ieee80211_is_data(hdr->frame_control)) {
 +    if (use_ht_rate && priv->drv_tx_reg_val[DRV_TX_REG_IDX_RATE_HT] > 0) {
-+      rate_hw_value = (priv->drv_tx_reg_val[DRV_TX_REG_IDX_RATE_HT] & OW_TX_RATE_OVERRIDE_MASK) - 4;
-+      use_short_gi = ((priv->drv_tx_reg_val[DRV_TX_REG_IDX_RATE_HT] & OW_TX_RATE_OVERRIDE_HT_SGI_BIT) == OW_TX_RATE_OVERRIDE_HT_SGI_BIT);
++      u8 ht_override_raw = (priv->drv_tx_reg_val[DRV_TX_REG_IDX_RATE_HT] & OW_TX_RATE_OVERRIDE_MASK);
++      if (ht_override_raw >= 4) {
++        rate_hw_value = ht_override_raw - 4;
++        use_short_gi = ((priv->drv_tx_reg_val[DRV_TX_REG_IDX_RATE_HT] & OW_TX_RATE_OVERRIDE_HT_SGI_BIT) == OW_TX_RATE_OVERRIDE_HT_SGI_BIT);
++      }
 +    } else if ((!use_ht_rate) && priv->drv_tx_reg_val[DRV_TX_REG_IDX_RATE] > 0) {
 +      rate_hw_value = (priv->drv_tx_reg_val[DRV_TX_REG_IDX_RATE] & OW_TX_RATE_OVERRIDE_MASK);
 +    }
-+    /* TX status reports driver-chosen rate without back-mapping to control.rates[0].idx. */
 +  }
 +
-+  /* FPGA workaround: HT aggregation at MCS0 can wedge TX core; bump to MCS1. */
++  /* Stage 3: FPGA workaround — HT aggregation at MCS0 can wedge TX core. */
 +  if (use_ht_aggr && rate_hw_value == OW_TX_HT_AGGR_MCS0) {
 +    rate_hw_value = OW_TX_HT_AGGR_MCS_FALLBACK;
 +  }
@@ -8037,6 +8176,30 @@ index 0000000..ee9a825
 +  ring->bds[ring->bd_wr_idx].dma_mapping_addr = dma_mapping_addr;
 +  ring->bds[ring->bd_wr_idx].dma_len_bytes = num_dma_byte;
 +  ring->bds[ring->bd_wr_idx].bounce_buf = bounce_buf;
++
++  /* Build actual_tx_rate from the final rate after all driver overrides.
++   * Start from original mac80211 flags (rc_flags), then patch only the
++   * bits that the overrides actually changed (MCS, SHORT_GI).  This
++   * preserves 40_MHZ_WIDTH, GREEN_FIELD, SHORT_PREAMBLE, STBC, LDPC
++   * which minstrel-HT uses for rate bucket selection. */
++  {
++    struct ieee80211_tx_rate atr;
++    u16 atr_flags = (u16)rc_flags;
++    if (use_ht_rate) {
++      atr_flags |= IEEE80211_TX_RC_MCS;
++    } else {
++      atr_flags &= ~IEEE80211_TX_RC_MCS;
++    }
++    if (use_short_gi) {
++      atr_flags |= IEEE80211_TX_RC_SHORT_GI;
++    } else {
++      atr_flags &= ~IEEE80211_TX_RC_SHORT_GI;
++    }
++    atr.idx = (s8)rate_hw_value;
++    atr.count = 0; /* filled by openwifi_tx_interrupt as nof_retx + 1 */
++    atr.flags = atr_flags;
++    ring->bds[ring->bd_wr_idx].actual_tx_rate = atr;
++  }
 +
 +  ring->bd_wr_idx = ((ring->bd_wr_idx+1)&(NUM_TX_BD-1));
 +
