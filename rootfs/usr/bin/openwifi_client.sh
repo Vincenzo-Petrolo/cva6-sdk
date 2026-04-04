@@ -150,6 +150,14 @@ connect_iface() {
   done
 
   udhcpc -i "$iface" -q -n -t 5
+
+  # Enable quickack on the default route to disable delayed ACK (40ms wait).
+  # On an asymmetric link (AP sends data, board sends ACKs), delayed ACK adds
+  # pure latency with zero piggybacking benefit.  Measured: 34→64 KB/s (2x).
+  gw=$(ip route show default dev "$iface" 2>/dev/null | awk '{print $3}')
+  if [ -n "$gw" ]; then
+    ip route change default via "$gw" dev "$iface" quickack 1 2>/dev/null || true
+  fi
 }
 
 status_iface() {
