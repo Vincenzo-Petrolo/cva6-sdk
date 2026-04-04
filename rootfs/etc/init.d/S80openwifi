@@ -87,9 +87,8 @@ echo 16 > /sys/module/sdr/parameters/rx_callback_fallback_n_cb
 echo 200 > /sys/module/sdr/parameters/rx_callback_fallback_n_ms
 
 # TCP tuning for STA-mode download throughput (measured 2026-04-03).
-# quickack=1: disables delayed ACK — doubled download speed (34→64 KB/s).
-#   On an asymmetric link (AP sends data, board sends ACKs), delayed ACK
-#   adds 40ms latency per ACK with zero piggybacking benefit.
+# NOTE: the biggest measured win (quickack=1, 34→64 KB/s) requires a default
+# route and is applied by openwifi_client.sh after DHCP, not here.
 # slow_start_after_idle=0: preserves cwnd across idle gaps (deauth/reconnect).
 #   WiFi link capacity doesn't change during brief idle — resetting cwnd
 #   after ~200ms inactivity is pessimistic.

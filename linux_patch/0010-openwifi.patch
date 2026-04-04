@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..bc56065
+index 0000000..828884f
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x0be9a09
++#define GIT_REV 0x5754619
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..63e9de1
@@ -1534,7 +1534,7 @@ index 0000000..79bd212
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/sdr.c b/drivers/sdr.c
 new file mode 100644
-index 0000000..ed1ca7f
+index 0000000..b2b2028
 --- /dev/null
 +++ b/drivers/sdr.c
 @@ -0,0 +1,1717 @@
@@ -2345,8 +2345,8 @@ index 0000000..ed1ca7f
 +   * 3. conf_tx() fires after association and overwrites with AP WMM params
 +   * 4. If AP is non-WMM, conf_tx() writes all-BE (0xA4A4A4A4) — these
 +   *    defaults provide correct WMM differentiation before that point */
-+  xpu_api->XPU_REG_CSMA_CFG_write(0xA4A44332);
-+  printk(KERN_INFO "%s openwifi_start: wrote default WMM CW 0xA4A44332\n",
++  xpu_api->XPU_REG_CSMA_CFG_write(OW_CSMA_CFG_WMM_DEFAULT);
++  printk(KERN_INFO "%s openwifi_start: wrote default WMM CW (OW_CSMA_CFG_WMM_DEFAULT)\n",
 +    sdr_compatible_str);
 +
 +  openwifi_rx_dma_watchdog_arm(priv);
@@ -3257,10 +3257,10 @@ index 0000000..ed1ca7f
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..0ef900a
+index 0000000..543823c
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,983 @@
+@@ -0,0 +1,994 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3533,6 +3533,17 @@ index 0000000..0ef900a
 +#define OW_TX_DMA_TAIL_PAD_MAX_BYTES \
 +  (OW_PHY_CRC_LEN_BYTES + (OW_TX_MPDU_DELIM_ALIGN_BYTES - 1) + \
 +   (TX_INTF_NUM_BYTE_PER_DMA_SYMBOL - 1))
++/* XPU_REG_CSMA_CFG register values for per-queue CW configuration.
++ * Each byte encodes one queue: low nibble = cw_min_exp, high nibble = cw_max_exp.
++ * CW = 2^exp - 1.  Byte order: [7:0]=Q0/VO, [15:8]=Q1/VI, [23:16]=Q2/BE, [31:24]=Q3/BK.
++ *
++ * OW_CSMA_CFG_ALL_BE: all queues CW[15,1023] — mac80211 non-WMM default.
++ *   Each byte 0xA4: cw_min_exp=4 (CW=15), cw_max_exp=0xA=10 (CW=1023).
++ * OW_CSMA_CFG_WMM_DEFAULT: standard 802.11e WMM per-queue defaults.
++ *   VO=0x32 (CW 3-7), VI=0x43 (CW 7-15), BE=0xA4 (CW 15-1023), BK=0xA4. */
++#define OW_CSMA_CFG_ALL_BE                  0xA4A4A4A4U
++#define OW_CSMA_CFG_WMM_DEFAULT             0xA4A44332U
++
 +#define OW_SPI_DISABLE_DISABLE              0U
 +#define OW_SPI_DISABLE_ENABLE               1U
 +#define OW_LBT_TH_AUTO_SENTINEL             0U
@@ -4246,10 +4257,10 @@ index 0000000..0ef900a
 +#endif /* OPENWIFI_SDR */
 diff --git a/drivers/sdr_mac_ops.c b/drivers/sdr_mac_ops.c
 new file mode 100644
-index 0000000..7553c89
+index 0000000..92c6571
 --- /dev/null
 +++ b/drivers/sdr_mac_ops.c
-@@ -0,0 +1,666 @@
+@@ -0,0 +1,711 @@
 +/**
 + * @file sdr_mac_ops.c
 + * @brief mac80211 operation callbacks for the OpenWiFi SDR driver.
@@ -4736,6 +4747,51 @@ index 0000000..7553c89
 +  }
 +
 +  xpu_api->XPU_REG_CSMA_CFG_write(reg_val);
++
++  /* DELIBERATE mac80211 override for research driver (like max_rates=4):
++   *
++   * After writing, check if all 4 queues ended up with identical BE CW.
++   * 0xA4A4A4A4 = all queues CW[15,1023]: each byte 0xA4 encodes
++   *   cw_min_exp=4 (CW_min=2^4-1=15), cw_max_exp=0xA=10 (CW_max=2^10-1=1023).
++   * 0xA4A44332 = standard 802.11e WMM defaults:
++   *   VO=0x32 (CW 3-7), VI=0x43 (CW 7-15), BE=0xA4 (CW 15-1023), BK=0xA4.
++   *
++   * All-BE happens when: (a) mac80211 pre-association defaults, (b) non-WMM AP
++   * (intentional by mac80211 — ieee80211_sta_wmm_params only installs real WMM
++   * params when AP advertises WMM IE), or (c) post-deauth reset before WMM IE.
++   *
++   * Without this override, VO queue promotion (sdr_tx.c) routes TCP ACKs to
++   * queue 0, but queue 0 has the same CW as queue 2 — zero benefit.
++   * When the AP sends a real WMM IE, conf_tx is called again with correct
++   * per-queue values and the override below won't trigger.
++   *
++   * TODO(openwifi-wmm-cw-override): This overrides mac80211's intentional
++   * non-WMM fallback.  On a non-WMM AP, 802.11 spec says all queues should
++   * be equal.  This hack prioritizes VO for the research platform.  To make
++   * it proper: either (a) only override during the post-deauth transient
++   * window, not for genuine non-WMM APs, or (b) accept the spec violation
++   * as a permanent research-platform optimization. */
++  /* Check for all-BE CW only after the LAST queue (BK=3) is configured.
++   * mac80211 calls conf_tx once per queue sequentially (0,1,2,3).  Checking
++   * after each queue risks triggering on intermediate states where Q0/Q1
++   * are already set to BE but Q2/Q3 haven't been updated yet.
++   *
++   * Use reg_val (not a hardware read-back) because reg_val already contains
++   * the cumulative state of ALL 4 queues: the read-modify-write above reads
++   * the full register (including prior queues' writes), then ORs in this
++   * queue's byte.  After Q3, reg_val = final state of all 4 queues.
++   * MMIO reads over AXI are slow and stall the CPU — avoid when possible.
++   *
++   * Only trigger when: (a) this is queue 3 (last in sequence),
++   * (b) mac80211 is controlling CW (not sysfs override), AND
++   * (c) ALL 4 queues ended up as BE (OW_CSMA_CFG_ALL_BE). */
++  if (queue == IEEE80211_AC_BK && priv->stat.cw_max_min_cfg == 0 &&
++      reg_val == OW_CSMA_CFG_ALL_BE) {
++    xpu_api->XPU_REG_CSMA_CFG_write(OW_CSMA_CFG_WMM_DEFAULT);
++    printk(KERN_INFO "%s openwifi_conf_tx: all-BE CW detected after Q3, "
++      "overriding with WMM defaults\n", sdr_compatible_str);
++  }
++
 +  return 0;
 +}
 +
@@ -6308,10 +6364,10 @@ index 0000000..e1759a5
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..4e653ba
+index 0000000..74c0ef9
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,1926 @@
+@@ -0,0 +1,1927 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -7506,7 +7562,8 @@ index 0000000..4e653ba
 +  u16 mpdu_delim_header;
 +  u32 num_dma_byte, addr1_low32, addr2_low32 = 0, addr3_low32 = 0, tx_config, cts_reg = 0, phy_hdr_config;
 +  u16 addr1_high16, addr2_high16 = 0, addr3_high16 = 0, sc, seq_no = 0, cts_duration = 0, sifs, ack_duration = 0, traffic_pkt_duration, n_dbps;
-+  u8 cts_rate_hw_value = 0, cts_rate_signal_value = 0, rate_hw_value, pkt_need_ack, retry_limit_raw, use_short_gi, *dma_buf, retry_limit_hw_value, rc_flags, qos_hdr, prio, queue_idx, drv_ring_idx;
++  u8 cts_rate_hw_value = 0, cts_rate_signal_value = 0, rate_hw_value, pkt_need_ack, retry_limit_raw, use_short_gi, *dma_buf, retry_limit_hw_value, qos_hdr, prio, queue_idx, drv_ring_idx;
++  u16 rc_flags; /* u16 not u8: ieee80211_tx_rate.flags is 11 bits */
 +  bool drv_seqno = false, use_rts_cts = false, use_cts_protect = false, ht_aggr_start = false, use_ht_rate = false, use_ht_aggr = false, cts_use_traffic_rate = false, force_use_cts_protect = false;
 +  __le16 frame_control, duration_id;
 +  u32 dma_fifo_no_room_flag, hw_queue_len, delay_count = 0;
@@ -8184,7 +8241,7 @@ index 0000000..4e653ba
 +   * which minstrel-HT uses for rate bucket selection. */
 +  {
 +    struct ieee80211_tx_rate atr;
-+    u16 atr_flags = (u16)rc_flags;
++    u16 atr_flags = rc_flags;
 +    if (use_ht_rate) {
 +      atr_flags |= IEEE80211_TX_RC_MCS;
 +    } else {
