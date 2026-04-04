@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..bab7583
+index 0000000..6946f56
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x34f7dcf
++#define GIT_REV 0x7dc3db1
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..63e9de1
@@ -3205,10 +3205,10 @@ index 0000000..8531aa1
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..8876a89
+index 0000000..3dffef0
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,955 @@
+@@ -0,0 +1,962 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3314,6 +3314,7 @@ index 0000000..8876a89
 +  /* beaconing */
 +  struct delayed_work beacon_work;
 +  bool enable_beacon;
++  bool tailroom_added; /* true after needed_tailroom += in add_interface */
 +};
 +
 +union u32_byte4 {
@@ -3459,6 +3460,12 @@ index 0000000..8876a89
 +#define OW_TX_MPDU_DELIM_ALIGN_BYTES        4U
 +#define OW_TX_MPDU_DELIM_LEN_SHIFT_BITS     4U
 +#define OW_TX_MPDU_DELIM_LEN_MASK           0xFFF0U
++/* Worst-case TX DMA tail padding reserve: CRC(4) + delim_pad(3) + DMA_align(7) = 14.
++ * Covers both non-AGGR (max 7) and AGGR (actual max 11, reserve 14) paths.
++ * Set on netdev->needed_tailroom to reduce skb_copy_expand in TX hot path. */
++#define OW_TX_DMA_TAIL_PAD_MAX_BYTES \
++  (OW_PHY_CRC_LEN_BYTES + (OW_TX_MPDU_DELIM_ALIGN_BYTES - 1) + \
++   (TX_INTF_NUM_BYTE_PER_DMA_SYMBOL - 1))
 +#define OW_SPI_DISABLE_DISABLE              0U
 +#define OW_SPI_DISABLE_ENABLE               1U
 +#define OW_LBT_TH_AUTO_SENTINEL             0U
@@ -4166,10 +4173,10 @@ index 0000000..8876a89
 +#endif /* OPENWIFI_SDR */
 diff --git a/drivers/sdr_mac_ops.c b/drivers/sdr_mac_ops.c
 new file mode 100644
-index 0000000..ac03342
+index 0000000..7553c89
 --- /dev/null
 +++ b/drivers/sdr_mac_ops.c
-@@ -0,0 +1,638 @@
+@@ -0,0 +1,666 @@
 +/**
 + * @file sdr_mac_ops.c
 + * @brief mac80211 operation callbacks for the OpenWiFi SDR driver.
@@ -4413,6 +4420,23 @@ index 0000000..ac03342
 +  priv->own_mac_low32 = get_unaligned_le32(priv->mac_addr + 2);
 +  xpu_api->XPU_REG_MAC_ADDR_write(priv->mac_addr);
 +
++  /* Add DMA padding tailroom ON TOP of mac80211's encryption reserve.
++   * mac80211 sets needed_tailroom = IEEE80211_ENCRYPT_TAILROOM (18) at netdev
++   * creation. Encryption consumes 8-12B of that before the skb reaches us,
++   * leaving insufficient room for DMA alignment (up to 14B). Using += adds
++   * our requirement without clobbering the encryption reserve.
++   * Symmetric -= in openwifi_remove_interface() prevents accumulation across
++   * ifconfig up/down cycles. The tailroom_added flag makes this idempotent
++   * across ieee80211_reconfig() (HW restart) which calls drv_add_interface
++   * without a prior drv_remove_interface. */
++  if (!vif_priv->tailroom_added) {
++    struct wireless_dev *wdev = ieee80211_vif_to_wdev(vif);
++    if (wdev && wdev->netdev) {
++      wdev->netdev->needed_tailroom += OW_TX_DMA_TAIL_PAD_MAX_BYTES;
++      vif_priv->tailroom_added = true;
++    }
++  }
++
 +  printk("%s openwifi_add_interface end with vif idx %d addr %pM\n",
 +    sdr_compatible_str, vif_priv->idx, vif->addr);
 +
@@ -4433,6 +4457,17 @@ index 0000000..ac03342
 +  vif_priv = (struct openwifi_vif *)&vif->drv_priv;
 +  vif_priv->enable_beacon = false;
 +  cancel_delayed_work_sync(&vif_priv->beacon_work);
++
++  /* Undo the DMA tailroom increment from openwifi_add_interface(). */
++  if (vif_priv->tailroom_added) {
++    struct wireless_dev *wdev = ieee80211_vif_to_wdev(vif);
++    if (wdev && wdev->netdev &&
++        wdev->netdev->needed_tailroom >= OW_TX_DMA_TAIL_PAD_MAX_BYTES) {
++      wdev->netdev->needed_tailroom -= OW_TX_DMA_TAIL_PAD_MAX_BYTES;
++    }
++    vif_priv->tailroom_added = false;
++  }
++
 +  priv->vif[vif_priv->idx] = NULL;
 +  printk("%s openwifi_remove_interface vif idx %d\n", sdr_compatible_str, vif_priv->idx);
 +}
@@ -4810,10 +4845,10 @@ index 0000000..ac03342
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..f43472f
+index 0000000..e1759a5
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1391 @@
+@@ -0,0 +1,1384 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -5975,16 +6010,11 @@ index 0000000..f43472f
 +   * IRQs are enabled; TX DMA completion can fire during this phase.
 +   * ================================================================= */
 +
-+  /* One dma_rmb() suffices for the entire batch — all DMA writes for all
-+   * claimed slots completed before Phase RX-A observed their flags as non-zero.
-+   * Ordering: FPGA writes header (including pkt_exist flag) FIRST, then payload
-+   * data (rx_intf_pl_to_m_axis.v DMA_HEADER1_INSERT_AND_START → WAIT_FILTER_FLAG).
-+   * The ADI DMAC S2MM transfer completes atomically per period — TLAST marks the
-+   * end of each slot's data, and the DMA callback/IRQ fires only after the full
-+   * transfer lands in memory.  Phase RX-A runs post-callback, so by the time it
-+   * observes flag != 0, ALL bytes (header + payload) for that slot are in memory.
-+   * dma_rmb() here ensures the CPU's memory ordering respects this: payload reads
-+   * in Phase RX-B cannot be speculatively reordered before the flag check. */
++  /* Keep a single DMA read barrier between Phase RX-A's slot-ready observations
++   * and Phase RX-B's metadata/payload reads. This preserves the old per-slot
++   * ordering intent while avoiding repeated barriers inside the hot loop:
++   * CPU reads in Phase RX-B are not reordered before the ready-flag checks that
++   * claimed these slots in Phase RX-A. */
 +  dma_rmb();
 +
 +  for (i = 0; i < n_claimed; i++) {
@@ -6168,12 +6198,10 @@ index 0000000..f43472f
 +   * ================================================================= */
 +  spin_lock_irqsave(&priv->lock, flags);
 +
-+  /* dma_wmb() orders CPU writes before the slot-flag clears that follow.
-+   * The spinlock acquire above already provides read-before-write ordering
-+   * (Phase B reads from DMA buffer → Phase C writes slot flags), so this
-+   * barrier is belt-and-suspenders for the write→write path: any Phase B
-+   * stores (e.g., ampdu_ref writeback at end of this block) are visible
-+   * before slot flags are cleared and the DMA engine can reuse the slots. */
++  /* Keep the release-side DMA barrier before returning slot ownership to
++   * hardware. This preserves the old per-slot helper semantics while batching
++   * the barrier once per Phase RX-C pass: Phase-C CPU writes are not reordered
++   * after the slot-flag clears that let the DMA engine reuse the slots. */
 +  dma_wmb();
 +
 +  for (i = 0; i < n_claimed; i++) {
@@ -6207,10 +6235,10 @@ index 0000000..f43472f
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..f49ef1d
+index 0000000..ee9a825
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,1833 @@
+@@ -0,0 +1,1836 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -7322,7 +7350,7 @@ index 0000000..f49ef1d
 +    num_ofdm_sym = calc_n_ofdm(num_octet, n_dbps);
 +    dur = sifs + OW_TX_LEGACY_PREAMBLE_US + OW_TX_OFDM_SYMBOL_US * num_ofdm_sym;
 +  } else {
-+    printk("%s openwifi_tx: WARNING gen_ht_duration_id wrong pkt type!\n", sdr_compatible_str);
++    printk_ratelimited("%s openwifi_tx: WARNING gen_ht_duration_id wrong pkt type!\n", sdr_compatible_str);
 +  }
 +
 +  return dur;
@@ -7413,14 +7441,14 @@ index 0000000..f49ef1d
 +  len_mpdu = skb->len;
 +
 +  if (skb->data_len > 0) { /* non-linear payload is unsupported on this TX path */
-+    printk("%s openwifi_tx: WARNING skb->data_len>0\n", sdr_compatible_str);
++    printk_ratelimited("%s openwifi_tx: WARNING skb->data_len>0\n", sdr_compatible_str);
 +    goto openwifi_tx_early_out;
 +  }
 +
 +  /* Get Linux priority/queue and destination MAC address. */
 +  prio = skb_get_queue_mapping(skb);
 +  if (prio >= MAX_NUM_HW_QUEUE) {
-+    printk("%s openwifi_tx: WARNING prio%d\n", sdr_compatible_str, prio);
++    printk_ratelimited("%s openwifi_tx: WARNING prio%d\n", sdr_compatible_str, prio);
 +    goto openwifi_tx_early_out;
 +  }
 +
@@ -7460,7 +7488,7 @@ index 0000000..f49ef1d
 +      }
 +      for (i = 0; i < empty_bd_idx; i++) {
 +        j = ((ring->bd_wr_idx + i) & (NUM_TX_BD - 1));
-+        printk("%s openwifi_tx: WARNING fake stop queue empty_bd_idx%d i%d lnx prio%d map to q%d stop%d hwq len%d wr%d rd%d bd prio%d len_mpdu%d seq_no%d skb_linked%p dma_mapping_addr=%pad\n", sdr_compatible_str,
++        printk_ratelimited("%s openwifi_tx: WARNING fake stop queue empty_bd_idx%d i%d lnx prio%d map to q%d stop%d hwq len%d wr%d rd%d bd prio%d len_mpdu%d seq_no%d skb_linked%p dma_mapping_addr=%pad\n", sdr_compatible_str,
 +        empty_bd_idx, i, prio, drv_ring_idx, ring->stop_flag, hw_queue_len, ring->bd_wr_idx, ring->bd_rd_idx, ring->bds[j].prio, ring->bds[j].len_mpdu, ring->bds[j].seq_no, ring->bds[j].skb_linked, &ring->bds[j].dma_mapping_addr);
 +        /* Report skipped buffered packet as failed TX status. */
 +        skb_new = ring->bds[j].skb_linked;
@@ -7484,7 +7512,7 @@ index 0000000..f49ef1d
 +      }
 +    } else {
 +      j = ring->bd_wr_idx;
-+      printk("%s openwifi_tx: WARNING real stop queue lnx prio%d map to q%d stop%d hwq len%d wr%d rd%d bd prio%d len_mpdu%d seq_no%d skb_linked%p dma_mapping_addr=%pad\n", sdr_compatible_str,
++      printk_ratelimited("%s openwifi_tx: WARNING real stop queue lnx prio%d map to q%d stop%d hwq len%d wr%d rd%d bd prio%d len_mpdu%d seq_no%d skb_linked%p dma_mapping_addr=%pad\n", sdr_compatible_str,
 +      prio, drv_ring_idx, ring->stop_flag, hw_queue_len, ring->bd_wr_idx, ring->bd_rd_idx, ring->bds[j].prio, ring->bds[j].len_mpdu, ring->bds[j].seq_no, ring->bds[j].skb_linked, &ring->bds[j].dma_mapping_addr);
 +
 +      /* NOTE: stop_queue under lock — same rationale as TX submit path.
@@ -7610,7 +7638,7 @@ index 0000000..f49ef1d
 +
 +  if (use_ht_aggr) {
 +    if (ieee80211_is_data_qos(frame_control) == false || len_mpdu < OW_TX_QOS_CTRL_MIN_LEN_BYTES) {
-+      printk("%s openwifi_tx: WARNING aggregation requires QoS frame length >= %u\n",
++      printk_ratelimited("%s openwifi_tx: WARNING aggregation requires QoS frame length >= %u\n",
 +        sdr_compatible_str, OW_TX_QOS_CTRL_MIN_LEN_BYTES);
 +      goto openwifi_tx_early_out;
 +    }
@@ -7662,7 +7690,7 @@ index 0000000..f49ef1d
 +  /* Reject packets larger than one TX descriptor DMA buffer. */
 +  num_dma_byte = (num_dma_symbol << TX_INTF_NUM_BYTE_PER_DMA_SYMBOL_IN_BITS);
 +  if (num_dma_byte > TX_BD_BUF_SIZE) {
-+    printk("%s openwifi_tx: WARNING sn %d num_dma_byte > TX_BD_BUF_SIZE\n", sdr_compatible_str, ring->bd_wr_idx);
++    printk_ratelimited("%s openwifi_tx: WARNING sn %d num_dma_byte > TX_BD_BUF_SIZE\n", sdr_compatible_str, ring->bd_wr_idx);
 +    goto openwifi_tx_early_out;
 +  }
 +
@@ -7670,9 +7698,9 @@ index 0000000..f49ef1d
 +  if (use_ht_aggr) {
 +    /* Ensure headroom for MPDU delimiter before skb_push. */
 +    if (skb_headroom(skb) < LEN_MPDU_DELIM) {
-+      printk("%s openwifi_tx: WARNING(AGGR) sn %d skb_headroom(skb) %d < LEN_MPDU_DELIM %d\n", sdr_compatible_str, ring->bd_wr_idx, skb_headroom(skb), LEN_MPDU_DELIM);
++      printk_ratelimited("%s openwifi_tx: WARNING(AGGR) sn %d skb_headroom(skb) %d < LEN_MPDU_DELIM %d\n", sdr_compatible_str, ring->bd_wr_idx, skb_headroom(skb), LEN_MPDU_DELIM);
 +      if ((skb_new = skb_realloc_headroom(skb, LEN_MPDU_DELIM)) == NULL) {
-+        printk("%s openwifi_tx: WARNING sn %d skb_realloc_headroom failed!\n", sdr_compatible_str, ring->bd_wr_idx);
++        printk_ratelimited("%s openwifi_tx: WARNING sn %d skb_realloc_headroom failed!\n", sdr_compatible_str, ring->bd_wr_idx);
 +        goto openwifi_tx_early_out;
 +      }
 +      if (skb->sk != NULL) {
@@ -7680,6 +7708,7 @@ index 0000000..f49ef1d
 +      }
 +      dev_kfree_skb(skb);
 +      skb = skb_new;
++      info = IEEE80211_SKB_CB(skb);
 +    }
 +    skb_push(skb, LEN_MPDU_DELIM);
 +    dma_buf = skb->data;
@@ -7693,10 +7722,10 @@ index 0000000..f49ef1d
 +    /* Extend skb for CRC + padding (+ optional empty delimiter). */
 +    num_byte_pad = num_dma_byte - (LEN_MPDU_DELIM + len_mpdu);
 +    if (skb_tailroom(skb) < num_byte_pad) {
-+      printk("%s openwifi_tx: WARNING(AGGR) sn %d skb_tailroom(skb) %d < num_byte_pad %d!\n", sdr_compatible_str, ring->bd_wr_idx, skb_tailroom(skb), num_byte_pad);
++      printk_ratelimited("%s openwifi_tx: WARNING(AGGR) sn %d skb_tailroom(skb) %d < num_byte_pad %d!\n", sdr_compatible_str, ring->bd_wr_idx, skb_tailroom(skb), num_byte_pad);
 +      /* GFP_ATOMIC is required because openwifi_tx runs in softirq context. */
 +      if ((skb_new = skb_copy_expand(skb, skb_headroom(skb), num_byte_pad, GFP_ATOMIC)) == NULL) {
-+        printk("%s openwifi_tx: WARNING(AGGR) sn %d skb_copy_expand failed!\n", sdr_compatible_str, ring->bd_wr_idx);
++        printk_ratelimited("%s openwifi_tx: WARNING(AGGR) sn %d skb_copy_expand failed!\n", sdr_compatible_str, ring->bd_wr_idx);
 +        goto openwifi_tx_early_out;
 +      }
 +      if (skb->sk != NULL) {
@@ -7704,6 +7733,7 @@ index 0000000..f49ef1d
 +      }
 +      dev_kfree_skb(skb);
 +      skb = skb_new;
++      info = IEEE80211_SKB_CB(skb);
 +      dma_buf = skb->data; /* Refresh pointer after skb_copy_expand replaced skb. */
 +    }
 +    skb_put(skb, num_byte_pad);
@@ -7724,10 +7754,10 @@ index 0000000..f49ef1d
 +    /* Extend skb tailroom to include DMA padding bytes. */
 +    num_byte_pad = num_dma_byte - len_mpdu;
 +    if (skb_tailroom(skb) < num_byte_pad) {
-+      printk("%s openwifi_tx: WARNING sn %d skb_tailroom(skb) %d < num_byte_pad %d!\n", sdr_compatible_str, ring->bd_wr_idx, skb_tailroom(skb), num_byte_pad);
++      printk_ratelimited("%s openwifi_tx: WARNING sn %d skb_tailroom(skb) %d < num_byte_pad %d!\n", sdr_compatible_str, ring->bd_wr_idx, skb_tailroom(skb), num_byte_pad);
 +      /* GFP_ATOMIC is required because openwifi_tx runs in softirq context. */
 +      if ((skb_new = skb_copy_expand(skb, skb_headroom(skb), num_byte_pad, GFP_ATOMIC)) == NULL) {
-+        printk("%s openwifi_tx: WARNING sn %d skb_copy_expand failed!\n", sdr_compatible_str, ring->bd_wr_idx);
++        printk_ratelimited("%s openwifi_tx: WARNING sn %d skb_copy_expand failed!\n", sdr_compatible_str, ring->bd_wr_idx);
 +        goto openwifi_tx_early_out;
 +      }
 +      if (skb->sk != NULL) {
@@ -7735,8 +7765,9 @@ index 0000000..f49ef1d
 +      }
 +      dev_kfree_skb(skb);
 +      skb = skb_new;
++      info = IEEE80211_SKB_CB(skb);
 +    }
-+    skb_put(skb, num_byte_pad);
++    memset(skb_put(skb, num_byte_pad), 0, num_byte_pad);
 +
 +    dma_buf = skb->data;
 +  }
@@ -7757,7 +7788,7 @@ index 0000000..f49ef1d
 +  if ((uintptr_t)dma_buf & OW_TX_DMA_ADDR_ALIGN_MASK) {
 +    bounce_buf = kmalloc(num_dma_byte, GFP_ATOMIC);
 +    if (!bounce_buf) {
-+      printk("%s openwifi_tx: WARNING sn %d ADI_DMA bounce_buf alloc failed\n",
++      printk_ratelimited("%s openwifi_tx: WARNING sn %d ADI_DMA bounce_buf alloc failed\n",
 +             sdr_compatible_str, ring->bd_wr_idx);
 +      goto openwifi_tx_early_out;
 +    }
@@ -7908,7 +7939,7 @@ index 0000000..f49ef1d
 +         num_dma_byte, DMA_MEM_TO_DEV);
 +
 +  if (dma_mapping_error(priv->tx_chan->device->dev, dma_mapping_addr)) {
-+    printk("%s openwifi_tx: WARNING sn %d TX DMA mapping error\n", sdr_compatible_str, ring->bd_wr_idx);
++    printk_ratelimited("%s openwifi_tx: WARNING sn %d TX DMA mapping error\n", sdr_compatible_str, ring->bd_wr_idx);
 +    goto openwifi_tx_early_out_free_bounce;
 +  }
 +
@@ -7985,14 +8016,14 @@ index 0000000..f49ef1d
 +  tx_intf_api->TX_INTF_REG_PHY_HDR_CONFIG_write(phy_hdr_config);
 +  priv->txd = priv->tx_chan->device->device_prep_slave_sg(priv->tx_chan, &(priv->tx_sg),1,DMA_MEM_TO_DEV, DMA_CTRL_ACK | DMA_PREP_INTERRUPT, NULL);
 +  if (!(priv->txd)) {
-+    printk("%s openwifi_tx: WARNING sn %d device_prep_slave_sg %p\n", sdr_compatible_str, ring->bd_wr_idx, (void*)(priv->txd));
++    printk_ratelimited("%s openwifi_tx: WARNING sn %d device_prep_slave_sg %p\n", sdr_compatible_str, ring->bd_wr_idx, (void*)(priv->txd));
 +    goto openwifi_tx_after_dma_mapping;
 +  }
 +
 +  WRITE_ONCE(priv->tx_cookie, priv->txd->tx_submit(priv->txd));
 +
 +  if (dma_submit_error(READ_ONCE(priv->tx_cookie))) {
-+    printk("%s openwifi_tx: WARNING sn %d dma_submit_error(tx_cookie) %d\n", sdr_compatible_str,
++    printk_ratelimited("%s openwifi_tx: WARNING sn %d dma_submit_error(tx_cookie) %d\n", sdr_compatible_str,
 +           ring->bd_wr_idx, (u32)(READ_ONCE(priv->tx_cookie)));
 +    WRITE_ONCE(priv->tx_cookie, 0);
 +    goto openwifi_tx_after_dma_mapping;
