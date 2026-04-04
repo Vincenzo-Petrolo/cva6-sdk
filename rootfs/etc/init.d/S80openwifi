@@ -75,13 +75,28 @@ else echo "WARNING: debugfs unavailable, AGC tuning skipped"; fi
 # Change "CH" to your country code if deploying outside Switzerland.
 iw reg set CH 2>/dev/null || true
 
-# Suppress rx_irq console spam (messages still available in dmesg)
-echo 4 > /proc/sys/kernel/printk
+# Console loglevel: emergencies only during throughput operation.
+# At 115200 baud, each 80-char printk blocks CPU ~7ms on CVA6 (100MHz).
+# Messages still available in dmesg.
+echo 1 > /proc/sys/kernel/printk
 
 # Theshire sysfs tuning (100MHz CVA6 — reduces TX poll budget and RX fallback frequency)
 echo 100 > /sys/module/sdr/parameters/tx_dma_wait_us
 echo 2 > /sys/module/sdr/parameters/tx_dma_poll_step_us
 echo 16 > /sys/module/sdr/parameters/rx_callback_fallback_n_cb
 echo 200 > /sys/module/sdr/parameters/rx_callback_fallback_n_ms
+
+# TCP tuning for STA-mode download throughput (measured 2026-04-03).
+# quickack=1: disables delayed ACK — doubled download speed (34→64 KB/s).
+#   On an asymmetric link (AP sends data, board sends ACKs), delayed ACK
+#   adds 40ms latency per ACK with zero piggybacking benefit.
+# slow_start_after_idle=0: preserves cwnd across idle gaps (deauth/reconnect).
+#   WiFi link capacity doesn't change during brief idle — resetting cwnd
+#   after ~200ms inactivity is pessimistic.
+# tcp_no_metrics_save=1: prevents stale RTT/cwnd metrics from bad periods
+#   poisoning future connections. WiFi quality changes faster than the
+#   metrics cache invalidates.
+sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null 2>&1
+sysctl -w net.ipv4.tcp_no_metrics_save=1 >/dev/null 2>&1
 
 echo "OpenWiFi RF initialized"
