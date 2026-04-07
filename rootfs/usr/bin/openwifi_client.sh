@@ -11,6 +11,9 @@
 #   connect <ssid> <passphrase> [iface]
 #   status [iface]
 #   disconnect [iface]
+#
+# Optional environment:
+#   THS_WIFI_FREQ_MHZ   pin association scans to one channel frequency in MHz
 #******************************************************************************
 
 set -eu
@@ -32,6 +35,9 @@ usage() {
   echo "  openwifi_client.sh connect <ssid> <passphrase> [iface]"
   echo "  openwifi_client.sh status [iface]"
   echo "  openwifi_client.sh disconnect [iface]"
+  echo
+  echo "Optional environment:"
+  echo "  THS_WIFI_FREQ_MHZ=<freq MHz>  pin association scans to one channel"
 }
 
 need_cmd() {
@@ -79,13 +85,39 @@ write_wpa_config() {
   passphrase="$2"
   conf_path="$3"
   ctrl_dir="$4"
+  scan_freq_mhz="${5:-}"
 
   mkdir -p "$RUNTIME_DIR" "$ctrl_dir"
   {
     echo "ctrl_interface=${ctrl_dir}"
     echo "update_config=0"
-    wpa_passphrase "$ssid" "$passphrase"
+    wpa_passphrase "$ssid" "$passphrase" | awk -v scan_freq_mhz="$scan_freq_mhz" '
+      /^network=\{/ {
+        print
+        if (scan_freq_mhz != "") {
+          print "\tscan_freq=" scan_freq_mhz
+        }
+        next
+      }
+      { print }
+    '
   } > "$conf_path"
+}
+
+# Validate optional frequency pinning input from the environment.
+validate_scan_freq_mhz() {
+  scan_freq_mhz="${1:-}"
+
+  if [ -z "$scan_freq_mhz" ]; then
+    return 0
+  fi
+
+  case "$scan_freq_mhz" in
+    *[!0-9]*)
+      echo "THS_WIFI_FREQ_MHZ must be an integer in MHz: ${scan_freq_mhz}" >&2
+      exit 1
+      ;;
+  esac
 }
 
 # Wait for wpa_supplicant to finish association before starting DHCP.
@@ -124,8 +156,10 @@ connect_iface() {
   ssid="$1"
   passphrase="$2"
   iface="$3"
+  scan_freq_mhz="${THS_WIFI_FREQ_MHZ:-}"
 
   state_paths "$iface"
+  validate_scan_freq_mhz "$scan_freq_mhz"
 
   ip link set "$iface" up
 
@@ -136,7 +170,11 @@ connect_iface() {
     fi
   fi
 
-  write_wpa_config "$ssid" "$passphrase" "$conf_path" "$ctrl_dir"
+  write_wpa_config "$ssid" "$passphrase" "$conf_path" "$ctrl_dir" "$scan_freq_mhz"
+
+  if [ -n "$scan_freq_mhz" ]; then
+    echo "Pinning association scan to ${scan_freq_mhz} MHz on ${iface}"
+  fi
 
   wpa_supplicant -B -i "$iface" -c "$conf_path" -P "$pid_path" -C "$ctrl_dir"
   wait_for_association "$iface" "$ctrl_dir"

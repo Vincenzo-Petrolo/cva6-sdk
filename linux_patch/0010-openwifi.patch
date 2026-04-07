@@ -30,10 +30,10 @@ index 0000000..828884f
 +#define GIT_REV 0x5754619
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
-index 0000000..63e9de1
+index 0000000..71787c7
 --- /dev/null
 +++ b/drivers/hw_def.h
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,529 @@
 +// Author: Xianjun jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -427,6 +427,7 @@ index 0000000..63e9de1
 +#define XPU_REG_RECV_ACK_COUNT_TOP1_ADDR      (17*4)
 +#define XPU_REG_SEND_ACK_WAIT_TOP_ADDR        (18*4)
 +#define XPU_REG_CSMA_CFG_ADDR                 (19*4)
++#define XPU_REG_AIFS_CFG_ADDR                 (23*4)
 +
 +#define XPU_REG_SLICE_COUNT_TOTAL_ADDR    (20*4)
 +#define XPU_REG_SLICE_COUNT_START_ADDR    (21*4)
@@ -529,6 +530,9 @@ index 0000000..63e9de1
 +
 +  void (*XPU_REG_CSMA_CFG_write)(u32 value);
 +  u32  (*XPU_REG_CSMA_CFG_read)(void);
++
++  void (*XPU_REG_AIFS_CFG_write)(u32 value);
++  u32  (*XPU_REG_AIFS_CFG_read)(void);
 +
 +  void (*XPU_REG_SLICE_COUNT_TOTAL_write)(u32 value);
 +  void (*XPU_REG_SLICE_COUNT_START_write)(u32 value);
@@ -1534,10 +1538,10 @@ index 0000000..79bd212
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/sdr.c b/drivers/sdr.c
 new file mode 100644
-index 0000000..b2b2028
+index 0000000..9b5434e
 --- /dev/null
 +++ b/drivers/sdr.c
-@@ -0,0 +1,1717 @@
+@@ -0,0 +1,1722 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu, Jetmir Haxhibeqiri, Pablo Avila Campos
 +// SPDX-FileCopyrightText: 2022 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -2348,6 +2352,9 @@ index 0000000..b2b2028
 +  xpu_api->XPU_REG_CSMA_CFG_write(OW_CSMA_CFG_WMM_DEFAULT);
 +  printk(KERN_INFO "%s openwifi_start: wrote default WMM CW (OW_CSMA_CFG_WMM_DEFAULT)\n",
 +    sdr_compatible_str);
++  xpu_api->XPU_REG_AIFS_CFG_write(OW_AIFS_CFG_WMM_DEFAULT);
++  printk(KERN_INFO "%s openwifi_start: wrote default WMM AIFSN (OW_AIFS_CFG_WMM_DEFAULT)\n",
++    sdr_compatible_str);
 +
 +  openwifi_rx_dma_watchdog_arm(priv);
 +
@@ -2655,15 +2662,14 @@ index 0000000..b2b2028
 +  ieee80211_hw_set(dev, RX_INCLUDES_FCS);
 +  ieee80211_hw_set(dev, BEACON_TX_STATUS);
 +  ieee80211_hw_set(dev, REPORTS_TX_ACK_STATUS);
-+  ieee80211_hw_set(dev, AP_LINK_PS);
-+  if (AGGR_ENABLE) {
-+    /* TODO(openwifi-ampdu-hw-flag): AMPDU_AGGREGATION is advertised, but
-+     * IEEE80211_AMPDU_RX_START/STOP are not wired to XPU_REG_AMPDU_ACTION
-+     * (see openwifi_ampdu_action() RX_START/RX_STOP cases — they just printk). Block ACK RX session
-+     * management is incomplete. This flag should be gated on complete BA
-+     * implementation, or at minimum documented as TX-only aggregation. */
-+    ieee80211_hw_set(dev, AMPDU_AGGREGATION);
-+  }
++  /* Intentionally do not advertise AP_LINK_PS.
++   * OpenWiFi AP mode in this repo does not implement the mac80211 buffered-
++   * frame/TIM hooks needed for AP-side station power save, and this project
++   * does not plan to add that functionality. */
++  /* Keep AMPDU_AGGREGATION disabled until RX BlockAck session management is
++   * wired end-to-end. The TX path has partial aggregation support, but
++   * openwifi_ampdu_action() RX_START/RX_STOP still do not configure real
++   * receive-side BA state. */
 +  ieee80211_hw_set(dev, SIGNAL_DBM);
 +  wiphy_ext_feature_set(dev->wiphy, NL80211_EXT_FEATURE_CQM_RSSI_LIST);
 +
@@ -2762,6 +2768,9 @@ index 0000000..b2b2028
 +  priv->stat.dbg_ch0 = 0;
 +  priv->stat.dbg_ch1 = 0;
 +  priv->stat.dbg_ch2 = 0;
++  priv->stat.tx_bounce_buf_count = 0;
++  priv->stat.tx_tailroom_expand_count = 0;
++  priv->stat.tx_vo_promote_count = 0;
 +}
 +
 +/**
@@ -3257,10 +3266,10 @@ index 0000000..b2b2028
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..543823c
+index 0000000..1d0b9bb
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,994 @@
+@@ -0,0 +1,998 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3543,6 +3552,7 @@ index 0000000..543823c
 + *   VO=0x32 (CW 3-7), VI=0x43 (CW 7-15), BE=0xA4 (CW 15-1023), BK=0xA4. */
 +#define OW_CSMA_CFG_ALL_BE                  0xA4A4A4A4U
 +#define OW_CSMA_CFG_WMM_DEFAULT             0xA4A44332U
++#define OW_AIFS_CFG_WMM_DEFAULT             0x00007322U
 +
 +#define OW_SPI_DISABLE_DISABLE              0U
 +#define OW_SPI_DISABLE_ENABLE               1U
@@ -4068,6 +4078,9 @@ index 0000000..543823c
 +  u32 tx_dma_soft_stop_count;
 +  u32 tx_dma_timeout_count;
 +  u32 tx_dma_error_count;
++  u32 tx_bounce_buf_count;
++  u32 tx_tailroom_expand_count;
++  u32 tx_vo_promote_count;
 +};
 +
 +//=============================================================================
@@ -4257,10 +4270,10 @@ index 0000000..543823c
 +#endif /* OPENWIFI_SDR */
 diff --git a/drivers/sdr_mac_ops.c b/drivers/sdr_mac_ops.c
 new file mode 100644
-index 0000000..92c6571
+index 0000000..28e67e0
 --- /dev/null
 +++ b/drivers/sdr_mac_ops.c
-@@ -0,0 +1,711 @@
+@@ -0,0 +1,731 @@
 +/**
 + * @file sdr_mac_ops.c
 + * @brief mac80211 operation callbacks for the OpenWiFi SDR driver.
@@ -4288,6 +4301,15 @@ index 0000000..92c6571
 +#define OW_CONF_TX_Q1_CLEAR_MASK             0xFFFF00FFU
 +#define OW_CONF_TX_Q2_CLEAR_MASK             0xFF00FFFFU
 +#define OW_CONF_TX_Q3_CLEAR_MASK             0x00FFFFFFU
++#define OW_CONF_TX_AIFS_FIELD_MASK           0x0FU
++#define OW_CONF_TX_AIFS_Q0_SHIFT             0U
++#define OW_CONF_TX_AIFS_Q1_SHIFT             4U
++#define OW_CONF_TX_AIFS_Q2_SHIFT             8U
++#define OW_CONF_TX_AIFS_Q3_SHIFT             12U
++#define OW_CONF_TX_AIFS_Q0_CLEAR_MASK        0xFFFFFFF0U
++#define OW_CONF_TX_AIFS_Q1_CLEAR_MASK        0xFFFFFF0FU
++#define OW_CONF_TX_AIFS_Q2_CLEAR_MASK        0xFFFFF0FFU
++#define OW_CONF_TX_AIFS_Q3_CLEAR_MASK        0xFFFF0FFFU
 +#define OW_FILTER_MONITOR_FLAGS_MASK         0xF0U
 +#define OW_FILTER_MONITOR_FLAGS_EXPECTED     OW_FILTER_MONITOR_FLAGS_MASK
 +#define OW_AMPDU_TX_OPERATIONAL_BUF_SIZE     4U
@@ -4641,6 +4663,11 @@ index 0000000..92c6571
 +
 +  if (changed & BSS_CHANGED_ERP_CTS_PROT) {
 +    printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed BSS_CHANGED_ERP_CTS_PROT %x\n", sdr_compatible_str, info->use_cts_prot);
++    /* mac80211 already propagates bss_conf.use_cts_prot into the per-frame
++     * TX flags (`IEEE80211_TX_RC_USE_CTS_PROTECT`) via tx.c/rate.c.
++     * Do not cache and blanket-force CTS-to-self here: that would bypass the
++     * per-frame decision and over-apply protection outside the intended ERP
++     * data-rate cases. */
 +  }
 +
 +  if (changed & BSS_CHANGED_BASIC_RATES) {
@@ -4686,15 +4713,11 @@ index 0000000..92c6571
 + * @return 0 on success, -EINVAL on invalid queue index.
 + *
 + * Current behavior:
-+ * - Applies CW min/max to hardware CSMA register.
-+ * - Logs aifs/txop but does not program them.
++ * - Applies CW min/max to the hardware CSMA register.
++ * - Applies per-queue AIFSN to the hardware AIFS register.
++ * - Logs txop but does not program it.
 + *
-+ * TODO(openwifi-conf-tx): Implement real AIFS/TXOP programming.
-+ * Required work:
-+ * 1) expose AIFS/TXOP register fields in FPGA/XPU RTL path;
-+ * 2) add driver writes in openwifi_conf_tx();
-+ * 3) validate EDCA behavior (per-AC latency/fairness) against mac80211 cfg.
-+ * Current RTL path accepts CW only.
++ * TXOP remains unsupported in the current FPGA path.
 + */
 +static int openwifi_conf_tx(
 +  struct ieee80211_hw *dev,
@@ -4703,12 +4726,13 @@ index 0000000..92c6571
 +  const struct ieee80211_tx_queue_params *params)
 +{
 +  struct openwifi_priv *priv = dev->priv;
-+  u32 reg_val, cw_min_exp, cw_max_exp;
++  u32 reg_val, aifs_reg_val, cw_min_exp, cw_max_exp;
 +  u32 cw_pair_field;
 +  (void)vif;
 +
++  aifs_reg_val = xpu_api->XPU_REG_AIFS_CFG_read();
 +  if (priv->stat.cw_max_min_cfg == 0) {
-+    printk("%s openwifi_conf_tx: [queue %d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d, aifs and txop ignored\n",
++    printk("%s openwifi_conf_tx: [queue %d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d, txop ignored\n",
 +      sdr_compatible_str, queue, params->aifs, params->cw_min, params->cw_max, params->txop);
 +
 +    reg_val = xpu_api->XPU_REG_CSMA_CFG_read();
@@ -4718,15 +4742,23 @@ index 0000000..92c6571
 +    switch (queue) {
 +    case IEEE80211_AC_VO:
 +      reg_val = (reg_val & OW_CONF_TX_Q0_CLEAR_MASK) | (cw_pair_field << OW_CONF_TX_Q0_SHIFT);
++      aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q0_CLEAR_MASK)
++        | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q0_SHIFT);
 +      break;
 +    case IEEE80211_AC_VI:
 +      reg_val = (reg_val & OW_CONF_TX_Q1_CLEAR_MASK) | (cw_pair_field << OW_CONF_TX_Q1_SHIFT);
++      aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q1_CLEAR_MASK)
++        | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q1_SHIFT);
 +      break;
 +    case IEEE80211_AC_BE:
 +      reg_val = (reg_val & OW_CONF_TX_Q2_CLEAR_MASK) | (cw_pair_field << OW_CONF_TX_Q2_SHIFT);
++      aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q2_CLEAR_MASK)
++        | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q2_SHIFT);
 +      break;
 +    case IEEE80211_AC_BK:
 +      reg_val = (reg_val & OW_CONF_TX_Q3_CLEAR_MASK) | (cw_pair_field << OW_CONF_TX_Q3_SHIFT);
++      aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q3_CLEAR_MASK)
++        | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q3_SHIFT);
 +      break;
 +    default:
 +      printk("%s openwifi_conf_tx: WARNING queue %d does not exist\n", sdr_compatible_str, queue);
@@ -4747,8 +4779,9 @@ index 0000000..92c6571
 +  }
 +
 +  xpu_api->XPU_REG_CSMA_CFG_write(reg_val);
++  xpu_api->XPU_REG_AIFS_CFG_write(aifs_reg_val);
 +
-+  /* DELIBERATE mac80211 override for research driver (like max_rates=4):
++  /* DELIBERATE mac80211 CW override for research driver (like max_rates=4):
 +   *
 +   * After writing, check if all 4 queues ended up with identical BE CW.
 +   * 0xA4A4A4A4 = all queues CW[15,1023]: each byte 0xA4 encodes
@@ -4767,10 +4800,10 @@ index 0000000..92c6571
 +   *
 +   * TODO(openwifi-wmm-cw-override): This overrides mac80211's intentional
 +   * non-WMM fallback.  On a non-WMM AP, 802.11 spec says all queues should
-+   * be equal.  This hack prioritizes VO for the research platform.  To make
-+   * it proper: either (a) only override during the post-deauth transient
-+   * window, not for genuine non-WMM APs, or (b) accept the spec violation
-+   * as a permanent research-platform optimization. */
++   * be equal.  This hack restores CW differentiation only; it does NOT
++   * rewrite AIFSN.  To make it proper: either (a) only override during the
++   * post-deauth transient window, not for genuine non-WMM APs, or (b) accept
++   * the spec violation as a permanent research-platform optimization. */
 +  /* Check for all-BE CW only after the LAST queue (BK=3) is configured.
 +   * mac80211 calls conf_tx once per queue sequentially (0,1,2,3).  Checking
 +   * after each queue risks triggering on intermediate states where Q0/Q1
@@ -4789,7 +4822,7 @@ index 0000000..92c6571
 +      reg_val == OW_CSMA_CFG_ALL_BE) {
 +    xpu_api->XPU_REG_CSMA_CFG_write(OW_CSMA_CFG_WMM_DEFAULT);
 +    printk(KERN_INFO "%s openwifi_conf_tx: all-BE CW detected after Q3, "
-+      "overriding with WMM defaults\n", sdr_compatible_str);
++      "overriding with WMM CW defaults only\n", sdr_compatible_str);
 +  }
 +
 +  return 0;
@@ -6364,10 +6397,10 @@ index 0000000..e1759a5
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..74c0ef9
+index 0000000..4273d60
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,1927 @@
+@@ -0,0 +1,1936 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -7564,7 +7597,7 @@ index 0000000..74c0ef9
 +  u16 addr1_high16, addr2_high16 = 0, addr3_high16 = 0, sc, seq_no = 0, cts_duration = 0, sifs, ack_duration = 0, traffic_pkt_duration, n_dbps;
 +  u8 cts_rate_hw_value = 0, cts_rate_signal_value = 0, rate_hw_value, pkt_need_ack, retry_limit_raw, use_short_gi, *dma_buf, retry_limit_hw_value, qos_hdr, prio, queue_idx, drv_ring_idx;
 +  u16 rc_flags; /* u16 not u8: ieee80211_tx_rate.flags is 11 bits */
-+  bool drv_seqno = false, use_rts_cts = false, use_cts_protect = false, ht_aggr_start = false, use_ht_rate = false, use_ht_aggr = false, cts_use_traffic_rate = false, force_use_cts_protect = false;
++  bool drv_seqno = false, use_rts_cts = false, use_cts_protect = false, ht_aggr_start = false, use_ht_rate = false, use_ht_aggr = false, cts_use_traffic_rate = false;
 +  __le16 frame_control, duration_id;
 +  u32 dma_fifo_no_room_flag, hw_queue_len, delay_count = 0;
 +  u16 aid = 0;
@@ -7627,6 +7660,9 @@ index 0000000..74c0ef9
 +   * Only applies to unicast requiring ACK, not broadcast. */
 +  if (drv_ring_idx == IEEE80211_AC_BE && len_mpdu <= 256 && pkt_need_ack) {
 +    drv_ring_idx = IEEE80211_AC_VO;
++    if (priv->stat.stat_enable) {
++      OW_U32_INC(priv->stat.tx_vo_promote_count);
++    }
 +  }
 +
 +  ring = &(priv->tx_ring[drv_ring_idx]);
@@ -7710,6 +7746,12 @@ index 0000000..74c0ef9
 +
 +  retry_limit_raw = info->control.rates[0].count;
 +
++  /* ERP CTS protection is driven per frame by mac80211.
++   * tx.c copies vif->bss_conf.use_cts_prot into info->control.use_cts_prot,
++   * and rate.c turns that into IEEE80211_TX_RC_USE_CTS_PROTECT when the
++   * selected rate/protection rules require it.  Intentionally consume only
++   * the per-frame flag here instead of forcing CTS from cached BSS state in
++   * the driver. */
 +  rc_flags = info->control.rates[0].flags;
 +  use_rts_cts = ((rc_flags & IEEE80211_TX_RC_USE_RTS_CTS) != 0);
 +  use_cts_protect = ((rc_flags & IEEE80211_TX_RC_USE_CTS_PROTECT) != 0);
@@ -7805,15 +7847,6 @@ index 0000000..74c0ef9
 +    }
 +    cts_rate_hw_value = cts_rate->hw_value;
 +    cts_duration = le16_to_cpu(ieee80211_ctstoself_duration(dev, info->control.vif, len_mpdu, info));
-+  } else if (force_use_cts_protect) {
-+    cts_rate_hw_value = OW_TX_RATE_6M_HW; /* wifi_mcs_table_11b_force_up[] maps to 6 Mbps legacy signaling */
-+    if (pkt_need_ack) {
-+      ack_duration = OW_TX_ACK_6M_US;
-+    }
-+
-+    n_dbps = (use_ht_rate ? wifi_n_dbps_ht_table[rate_hw_value + 4] : wifi_n_dbps_table[rate_hw_value]);
-+    traffic_pkt_duration = (use_ht_rate ? OW_TX_HT_PREAMBLE_US : OW_TX_LEGACY_PREAMBLE_US) + OW_TX_OFDM_SYMBOL_US * calc_n_ofdm(len_mpdu, n_dbps);
-+    cts_duration = traffic_pkt_duration + sifs + pkt_need_ack * (sifs + ack_duration);
 +  }
 +
 +  if (len_mpdu >= 28) {
@@ -7931,6 +7964,9 @@ index 0000000..74c0ef9
 +      skb = skb_new;
 +      info = IEEE80211_SKB_CB(skb);
 +      dma_buf = skb->data; /* Refresh pointer after skb_copy_expand replaced skb. */
++      if (priv->stat.stat_enable) {
++        OW_U32_INC(priv->stat.tx_tailroom_expand_count);
++      }
 +    }
 +    skb_put(skb, num_byte_pad);
 +
@@ -7962,6 +7998,9 @@ index 0000000..74c0ef9
 +      dev_kfree_skb(skb);
 +      skb = skb_new;
 +      info = IEEE80211_SKB_CB(skb);
++      if (priv->stat.stat_enable) {
++        OW_U32_INC(priv->stat.tx_tailroom_expand_count);
++      }
 +    }
 +    memset(skb_put(skb, num_byte_pad), 0, num_byte_pad);
 +
@@ -7990,16 +8029,19 @@ index 0000000..74c0ef9
 +    }
 +    memcpy(bounce_buf, dma_buf, num_dma_byte);
 +    dma_buf = (u8 *)bounce_buf;
++    if (priv->stat.stat_enable) {
++      OW_U32_INC(priv->stat.tx_bounce_buf_count);
++    }
 +  }
 +
 +  retry_limit_hw_value = (retry_limit_raw == 0 ? 0 : ((retry_limit_raw - 1) & OW_TX_RETRY_LIMIT_MASK));
 +
 +  queue_idx = drv_ring_idx; /* driver ring index maps 1:1 to FPGA queue index */
 +
-+  if (use_cts_protect || force_use_cts_protect) {
++  if (use_cts_protect) {
 +    rate_signal_value = (use_ht_rate ? rate_hw_value : wifi_mcs_table_11b_force_up[rate_hw_value]);
 +    cts_rate_signal_value = wifi_mcs_table_11b_force_up[cts_rate_hw_value];
-+    cts_reg = ((use_cts_protect | force_use_cts_protect) << 31
++    cts_reg = (use_cts_protect << 31
 +      | cts_use_traffic_rate << 30 | cts_duration << 8 | cts_rate_signal_value << 4 | rate_signal_value);
 +  }
 +  phy_hdr_config = (ht_aggr_start << 20 | rate_hw_value << 16 | use_ht_rate << 15 | use_short_gi << 14 | use_ht_aggr << 13 | len_psdu);
@@ -8909,10 +8951,10 @@ index 0000000..e3f209e
 +}
 diff --git a/drivers/sdrctl_intf.c b/drivers/sdrctl_intf.c
 new file mode 100644
-index 0000000..23ea11e
+index 0000000..f398d51
 --- /dev/null
 +++ b/drivers/sdrctl_intf.c
-@@ -0,0 +1,684 @@
+@@ -0,0 +1,685 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -9001,6 +9043,7 @@ index 0000000..23ea11e
 +  XPU_REG_RECV_ACK_COUNT_TOP1_ADDR,
 +  XPU_REG_SEND_ACK_WAIT_TOP_ADDR,
 +  XPU_REG_CSMA_CFG_ADDR,
++  XPU_REG_AIFS_CFG_ADDR,
 +  XPU_REG_SLICE_COUNT_TOTAL_ADDR,
 +  XPU_REG_SLICE_COUNT_START_ADDR,
 +  XPU_REG_SLICE_COUNT_END_ADDR,
@@ -10346,10 +10389,10 @@ index 0000000..a5fb54b
 +#define SIDE_CH_REG_M_AXIS_DATA_COUNT_ADDR         (20*4)
 diff --git a/drivers/sysfs_intf.c b/drivers/sysfs_intf.c
 new file mode 100644
-index 0000000..b04b41a
+index 0000000..fb5af3d
 --- /dev/null
 +++ b/drivers/sysfs_intf.c
-@@ -0,0 +1,1747 @@
+@@ -0,0 +1,1753 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -12069,6 +12112,9 @@ index 0000000..b04b41a
 +OW_SYSFS_SHOW_STAT(tx_dma_error_count);
 +OW_SYSFS_SHOW_STAT(tx_dma_hard_stop_count);
 +OW_SYSFS_SHOW_STAT(tx_dma_soft_stop_count);
++OW_SYSFS_SHOW_STAT(tx_bounce_buf_count);
++OW_SYSFS_SHOW_STAT(tx_tailroom_expand_count);
++OW_SYSFS_SHOW_STAT(tx_vo_promote_count);
 +OW_SYSFS_SHOW_PRIV(tx_dma_stall_window_count);
 +OW_SYSFS_SHOW_PRIV(rx_invalid_header_count);
 +OW_SYSFS_SHOW_PRIV(rx_dma_cb_full_count);
@@ -12084,6 +12130,9 @@ index 0000000..b04b41a
 +  &dev_attr_tx_dma_error_count.attr,
 +  &dev_attr_tx_dma_hard_stop_count.attr,
 +  &dev_attr_tx_dma_soft_stop_count.attr,
++  &dev_attr_tx_bounce_buf_count.attr,
++  &dev_attr_tx_tailroom_expand_count.attr,
++  &dev_attr_tx_vo_promote_count.attr,
 +  &dev_attr_tx_dma_stall_window_count.attr,
 +  &dev_attr_rx_invalid_header_count.attr,
 +  &dev_attr_rx_dma_cb_full_count.attr,
@@ -12598,16 +12647,61 @@ index 0000000..b6f83c7
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/xpu/xpu.c b/drivers/xpu/xpu.c
 new file mode 100644
-index 0000000..a42a80a
+index 0000000..c9bb6ee
 --- /dev/null
 +++ b/drivers/xpu/xpu.c
-@@ -0,0 +1,637 @@
+@@ -0,0 +1,702 @@
 +/*
 + * axi lite register access driver
 + * Author: Xianjun Jiao, Michael Mehari, Wei Liu
 + * SPDX-FileCopyrightText: 2019 UGent
 + * SPDX-License-Identifier: AGPL-3.0-or-later
-+*/
++ */
++
++/**
++ * @file xpu.c
++ * @brief AXI-Lite register binding for the OpenWiFi XPU low-MAC controller.
++ *
++ * This file is the software-side register contract for the FPGA XPU block.
++ * The XPU owns the OpenWiFi low-MAC timing and queue-control state that sits
++ * below mac80211 but above the raw TX/RX datapaths.
++ *
++ * Register groups relevant to current bring-up and throughput work:
++ * - TSF and band timing:
++ *   - `XPU_REG_BAND_CHANNEL` carries band/channel plus ERP short-slot state.
++ *   - `XPU_REG_SEND_ACK_WAIT_TOP` and `XPU_REG_RECV_ACK_COUNT_TOP{0,1}` carry
++ *     band-specific ACK/SIFS timing windows used by the RTL state machines.
++ *   - The intent matches the 802.11 timing split between PHY-dependent ACK
++ *     turnaround and MAC-visible interframe spaces. The driver chooses the
++ *     band profile while RTL consumes microsecond-scale countdown values.
++ * - EDCA / CSMA:
++ *   - `XPU_REG_CSMA_CFG` packs CW min/max exponents for queues q0..q3.
++ *   - `XPU_REG_AIFS_CFG` packs per-queue AIFSN values for q0..q3.
++ *     Queue order is q0=VO, q1=VI, q2=BE, q3=BK in the current driver/RTL map.
++ *     In the current RTL, an AIFSN nibble of 0 maps to the historical
++ *     DIFS-for-all behavior (effective AIFSN=2).
++ *   - This follows the 802.11 EDCA rule that each access category waits for
++ *     `AIFS = SIFS + AIFSN * slot_time` before backoff starts. CW and AIFSN
++ *     are implemented; TXOP bursting is still not.
++ * - Aggregation:
++ *   - `XPU_REG_AMPDU_ACTION` carries per-TID aggregation control consumed by
++ *     the low-MAC/TX coordination path. The TX path also has separate
++ *     aggregation programming in the TX_INTF register block.
++ *   - The Linux driver still does not complete RX BlockAck session management,
++ *     reorder-session lifecycle, or full advertised AMPDU interoperability, so
++ *     software must not claim full AMPDU capability purely because this
++ *     register exists.
++ *
++ * Timing units and standard intent:
++ * - The RTL CSMA/NAV engines count microsecond-scale timing against the 1 MHz
++ *   TSF pulse domain.
++ * - SIFS/slot values come either from the standard per-band defaults in RTL or
++ *   from explicit debug overrides.
++ * - EDCA AIFS is implemented as `SIFS + AIFSN * slot_time`, matching the
++ *   802.11 queue-access model. TXOP is still not implemented in hardware.
++ * - DIFS therefore remains the special case `SIFS + 2 * slot_time`, which is
++ *   what the zero-AIFSN compatibility mapping preserves for legacy software.
++ */
 +
 +#include <linux/bitops.h>
 +#include <linux/dmapool.h>
@@ -12820,6 +12914,24 @@ index 0000000..a42a80a
 +
 +static inline u32 XPU_REG_CSMA_CFG_read(void){
 +	return reg_read(XPU_REG_CSMA_CFG_ADDR);
++}
++
++/**
++ * @brief Write per-queue AIFSN configuration register.
++ *
++ * @param value Packed q3..q0 AIFSN nibbles.
++ */
++static inline void XPU_REG_AIFS_CFG_write(u32 value){
++  reg_write(XPU_REG_AIFS_CFG_ADDR, value);
++}
++
++/**
++ * @brief Read packed per-queue AIFSN configuration register.
++ *
++ * @return Packed q3..q0 AIFSN nibbles.
++ */
++static inline u32 XPU_REG_AIFS_CFG_read(void){
++  return reg_read(XPU_REG_AIFS_CFG_ADDR);
 +}
 +
 +static inline void XPU_REG_SLICE_COUNT_TOTAL_write(u32 value){
@@ -13155,6 +13267,8 @@ index 0000000..a42a80a
 +
 +	xpu_api->XPU_REG_CSMA_CFG_write=XPU_REG_CSMA_CFG_write;
 +	xpu_api->XPU_REG_CSMA_CFG_read=XPU_REG_CSMA_CFG_read;
++	xpu_api->XPU_REG_AIFS_CFG_write=XPU_REG_AIFS_CFG_write;
++	xpu_api->XPU_REG_AIFS_CFG_read=XPU_REG_AIFS_CFG_read;
 +
 +	xpu_api->XPU_REG_SLICE_COUNT_TOTAL_write=XPU_REG_SLICE_COUNT_TOTAL_write;
 +	xpu_api->XPU_REG_SLICE_COUNT_START_write=XPU_REG_SLICE_COUNT_START_write;

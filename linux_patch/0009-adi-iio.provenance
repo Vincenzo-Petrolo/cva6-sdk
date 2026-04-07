@@ -1,7 +1,7 @@
-# 0009-adi-iio.patch provenance — generated 2026-03-20T13:21:28+01:00
+# 0009-adi-iio.patch provenance — generated 2026-04-07T09:07:35+02:00
 # Re-run: source source_toolchains.sh && bash util/regen_adi_iio_patch.sh
 adi_linux_commit=c2f371e014f0
-openwifi_commit=f568088
-theshire_commit=53f35201
-prefixed_files=cf_axi_adc_core.c cf_axi_adc.h
+openwifi_commit=5754619
+theshire_commit=94251c1a7
+prefixed_files=ad9361_conv.c cf_axi_adc_core.c cf_axi_adc.h
 prefixed_source=patches/cva6-sdk-linux/files/drivers/iio/adc/
