@@ -142,14 +142,110 @@ wait_for_association() {
 }
 
 #==============================================================================
+# wait_for_carrier - Wait until the kernel reports link carrier for the iface
+#
+# Args:
+#   $1 - Interface name
+#   $2 - Timeout in seconds
+#
+# Returns:
+#   0 when carrier becomes 1, 1 on timeout
+#==============================================================================
+wait_for_carrier() {
+  iface="$1"
+  timeout_sec="$2"
+
+  while [ "$timeout_sec" -gt 0 ]; do
+    if [ "$(cat /sys/class/net/"$iface"/carrier 2>/dev/null)" = "1" ]; then
+      return 0
+    fi
+
+    sleep 1
+    timeout_sec=$((timeout_sec - 1))
+  done
+
+  return 1
+}
+
+#==============================================================================
+# flush_iface_l3_state - Drop stale IPv4 addresses and routes on one interface
+#
+# Args:
+#   $1 - Interface name
+#==============================================================================
+flush_iface_l3_state() {
+  iface="$1"
+
+  ip route flush dev "$iface" 2>/dev/null || true
+  ip addr flush dev "$iface" 2>/dev/null || true
+}
+
+#==============================================================================
+# run_dhcp_with_retry - Run udhcpc once, then retry once on failure
+#
+# Args:
+#   $1 - Interface name
+#
+# Returns:
+#   0 on DHCP success, non-zero on final failure
+#==============================================================================
+run_dhcp_with_retry() {
+  iface="$1"
+
+  if udhcpc -i "$iface" -q -n -t 5; then
+    return 0
+  fi
+
+  echo "First DHCP attempt failed on ${iface}; retrying once..." >&2
+  sleep 1
+  udhcpc -i "$iface" -q -n -t 5
+}
+
+#==============================================================================
+# print_connect_summary - Print one-line association and network summary
+#
+# Args:
+#   $1 - Interface name
+#   $2 - wpa_cli control directory
+#==============================================================================
+print_connect_summary() {
+  iface="$1"
+  ctrl_dir="$2"
+  wpa_status="$(wpa_cli -p "$ctrl_dir" -i "$iface" status 2>/dev/null || true)"
+  assoc_ssid="$(printf '%s\n' "$wpa_status" | awk -F= '$1 == "ssid" { print $2; exit }')"
+  assoc_bssid="$(printf '%s\n' "$wpa_status" | awk -F= '$1 == "bssid" { print $2; exit }')"
+  assoc_freq="$(printf '%s\n' "$wpa_status" | awk -F= '$1 == "freq" { print $2; exit }')"
+  ipv4_addr="$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{ print $4; exit }')"
+  default_gw="$(ip route show default dev "$iface" 2>/dev/null | awk '{ print $3; exit }')"
+  quickack_applied="no"
+  default_route_line="$(ip route show default dev "$iface" 2>/dev/null | head -n 1 || true)"
+
+  case "$default_route_line" in
+    *"quickack 1"*)
+      quickack_applied="yes"
+      ;;
+  esac
+
+  echo "Connected: iface=${iface} ssid=${assoc_ssid:-unknown} bssid=${assoc_bssid:-unknown} freq=${assoc_freq:-unknown} ip=${ipv4_addr:-none} gw=${default_gw:-none} quickack=${quickack_applied}"
+}
+
+#==============================================================================
 # Actions
 #==============================================================================
 
 scan_iface() {
   iface="$1"
+  scan_freq_mhz="${THS_WIFI_FREQ_MHZ:-}"
+
+  validate_scan_freq_mhz "$scan_freq_mhz"
 
   ip link set "$iface" up
-  iw dev "$iface" scan
+  if [ -n "$scan_freq_mhz" ]; then
+    echo "Pinning scan to ${scan_freq_mhz} MHz on ${iface}"
+    iw dev "$iface" scan freq "$scan_freq_mhz"
+  else
+    iw dev "$iface" scan
+  fi
 }
 
 connect_iface() {
@@ -162,6 +258,7 @@ connect_iface() {
   validate_scan_freq_mhz "$scan_freq_mhz"
 
   ip link set "$iface" up
+  flush_iface_l3_state "$iface"
 
   if [ -f "$pid_path" ]; then
     pid="$(cat "$pid_path" 2>/dev/null || true)"
@@ -182,12 +279,12 @@ connect_iface() {
   # Wait for carrier — mac80211 carrier-on is async and delayed on 100MHz CVA6.
   # Without this, first udhcpc attempt hits NO-CARRIER window and fails.
   echo "Waiting for carrier on ${iface}..."
-  for _ in 1 2 3 4 5; do
-    [ "$(cat /sys/class/net/${iface}/carrier 2>/dev/null)" = "1" ] && break
-    sleep 1
-  done
+  if ! wait_for_carrier "$iface" 5; then
+    echo "Carrier did not come up on ${iface} after association" >&2
+    return 1
+  fi
 
-  udhcpc -i "$iface" -q -n -t 5
+  run_dhcp_with_retry "$iface"
 
   # Enable quickack on the default route to disable delayed ACK (40ms wait).
   # On an asymmetric link (AP sends data, board sends ACKs), delayed ACK adds
@@ -196,6 +293,8 @@ connect_iface() {
   if [ -n "$gw" ]; then
     ip route change default via "$gw" dev "$iface" quickack 1 2>/dev/null || true
   fi
+
+  print_connect_summary "$iface" "$ctrl_dir"
 }
 
 status_iface() {
@@ -232,6 +331,7 @@ disconnect_iface() {
     fi
   fi
 
+  ip route flush dev "$iface" 2>/dev/null || true
   ip addr flush dev "$iface" || true
   ip link set "$iface" down || true
 }

@@ -3,10 +3,14 @@
 # openwifi_ap — AP mode helper for OpenWiFi on CVA6 Linux target
 #
 # Starts/stops hostapd + udhcpd for WiFi AP mode.
+# This remains useful for controlled AP-side testing on theshire/CVA6 even
+# though STA mode is still the primary deployment path.
 #
 # KNOWN LIMITATION: TX/data reliability is still degraded. Beacons broadcast and
 # client association can complete, but DHCP/data traffic remains unreliable due
-# to high data-frame ACK failure rate. See docs/todo/todo_openwifi_tx_auth_failure.md.
+# to high data-frame ACK failure rate. The bundled hostapd config keeps
+# `wmm_enabled=1` explicit for deterministic HT/AMPDU negotiation during AP
+# testing. See docs/todo/todo_openwifi_tx_auth_failure.md.
 #
 # Supported commands:
 #   start  [iface]    — start AP mode
@@ -48,6 +52,7 @@ warn_tx_ack() {
   echo "WARNING: TX ACK timing issue is NOT yet fixed."
   echo "  Beacons broadcast — AP is VISIBLE to nearby devices."
   echo "  Client association may succeed, but DHCP/data traffic remains unreliable."
+  echo "  This AP path is still useful for controlled Wi-Fi-side testing."
   echo "  See: docs/todo/todo_openwifi_tx_auth_failure.md"
   echo ""
 }

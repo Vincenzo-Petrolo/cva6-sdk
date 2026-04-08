@@ -23,17 +23,17 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..828884f
+index 0000000..c90a099
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x5754619
++#define GIT_REV 0x49cb91d
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
-index 0000000..71787c7
+index 0000000..12fe2eb
 --- /dev/null
 +++ b/drivers/hw_def.h
-@@ -0,0 +1,529 @@
+@@ -0,0 +1,615 @@
 +// Author: Xianjun jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -42,6 +42,17 @@ index 0000000..71787c7
 +#define __HW_DEF_H_FILE__
 +
 +#include <linux/string.h>
++
++/*
++ * hw_def.h ownership notes:
++ * - This header is the maintained source of truth for OpenWiFi software-side
++ *   register addresses, bitfield layouts, and driver-facing register APIs.
++ * - Keep software-visible bit positions, masks, and shared pack/unpack helpers
++ *   here when they are used across multiple C files.
++ * - Do not treat raw RTL slv_reg comments as the canonical software contract.
++ *   The matching behavior contract belongs in the relevant driver file
++ *   (for example driver/xpu/xpu.c for XPU semantics).
++ */
 +
 +enum openwifi_hardware_type {
 +  ZYNQ_AD9361 = 0,
@@ -145,7 +156,10 @@ index 0000000..71787c7
 +  BAND_60GHZ,
 +};
 +
-+// ------------------------------------tx interface----------------------------------------
++/* TX interface AXI-Lite register map.
++ * PKT_INFO1..4 are live hardware completion FIFO read ports.
++ * The TX IRQ path is the runtime consumer; sdrctl exposes the last
++ * IRQ-captured tuple instead of popping these FIFOs directly. */
 +#define TX_INTF_REG_MULTI_RST_ADDR                 (0*4)
 +#define TX_INTF_REG_ARBITRARY_IQ_ADDR              (1*4)
 +#define TX_INTF_REG_WIFI_TX_MODE_ADDR              (2*4)
@@ -169,6 +183,45 @@ index 0000000..71787c7
 +#define TX_INTF_REG_PKT_INFO3_ADDR                 (24*4)
 +#define TX_INTF_REG_PKT_INFO4_ADDR                 (25*4)
 +#define TX_INTF_REG_QUEUE_FIFO_DATA_COUNT_ADDR     (26*4)
++
++/* TX_INTF_REG_AMPDU_ACTION_CONFIG bit layout.
++ * RTL consumer: tx_bit_intf.v.
++ * Software producer: sdr_mac_ops.c openwifi_ampdu_action().
++ * Density shift must stay at 22U here. It was previously set to 24U in the
++ * driver, which silently mis-packed every non-zero density value. */
++#define OW_AMPDU_ACTION_CONFIG_MAX_TX_BYTES_MASK   0xFFFFU
++#define OW_AMPDU_ACTION_CONFIG_BUF_SIZE_SHIFT      16U
++#define OW_AMPDU_ACTION_CONFIG_BUF_SIZE_MASK       0x3FU
++#define OW_AMPDU_ACTION_CONFIG_DENSITY_SHIFT       22U
++#define OW_AMPDU_ACTION_CONFIG_DENSITY_MASK        0x7U
++
++/* TX_INTF_REG_PKT_INFO1 bit layout.
++ * RTL producer: tx_status_fifo.v / tx_control.v.
++ * Software consumer: sdr_tx.c. */
++#define OW_TX_PKT_INFO1_RETX_MASK               0xFU
++#define OW_TX_PKT_INFO1_LAST_BD_SHIFT           5U
++#define OW_TX_PKT_INFO1_QUEUE_SHIFT             15U
++#define OW_TX_PKT_INFO1_PRIO_SHIFT              17U
++#define OW_TX_PKT_INFO1_PRIO_MASK               0x3U
++#define OW_TX_PKT_INFO1_NUM_SLOT_SHIFT          19U
++#define OW_TX_PKT_INFO1_NUM_SLOT_MASK           0x1FFU
++#define OW_TX_PKT_INFO1_CW_SHIFT                28U
++#define OW_TX_PKT_INFO1_CW_MASK                 0xFU
++
++/* TX_INTF_REG_PKT_INFO2 bit layout.
++ * RTL producer: tx_status_fifo.v / tx_control.v.
++ * Software consumer: sdr_tx.c.
++ * - bits  5:0  = pkt_cnt
++ * - bits 17:6  = blk_ack_resp_ssn
++ * - bits 31:30 = tx_resp_class */
++#define OW_TX_PKT_INFO2_PKT_CNT_MASK               0x3FU
++#define OW_TX_PKT_INFO2_BA_SSN_SHIFT               6U
++#define OW_TX_PKT_INFO2_RESP_CLASS_SHIFT           30U
++#define OW_TX_PKT_INFO2_RESP_CLASS_MASK            0x3U
++
++#define OW_TX_RESP_CLASS_NONE                      0U
++#define OW_TX_RESP_CLASS_ACK                       1U
++#define OW_TX_RESP_CLASS_BLOCKACK                  2U
 +
 +#define TX_INTF_NUM_ANTENNA                        2
 +#define TX_INTF_NUM_BYTE_PER_DMA_SYMBOL            (64/8)
@@ -439,6 +492,32 @@ index 0000000..71787c7
 +#define XPU_REG_BSSID_FILTER_HIGH_ADDR    (29*4)
 +#define XPU_REG_MAC_ADDR_LOW_ADDR         (30*4)
 +#define XPU_REG_MAC_ADDR_HIGH_ADDR        (31*4)
++#define XPU_REG_AMPDU_RX_PEER_LOW_ADDR    (32*4)
++#define XPU_REG_AMPDU_RX_PEER_HIGH_ADDR   (33*4)
++
++/* XPU_REG_AMPDU_ACTION bit layout.
++ * RTL consumers: xpu.v / tx_control.v.
++ * Software producer: sdr_mac_ops.c openwifi_ampdu_action().
++ * - bit31    = RX BA session enable
++ * - bits 4:1 = active RX BA TID
++ * - bit0     = clear/start pulse for session state reset */
++
++/* XPU_REG_AIFS_CFG bit layout.
++ * RTL consumer: xpu.v / csma_ca.v.
++ * Software producer: sdr_mac_ops.c openwifi_conf_tx().
++ * Queue order follows the OpenWiFi driver contract:
++ * - bits  3:0  = q0 / VO AIFSN
++ * - bits  7:4  = q1 / VI AIFSN
++ * - bits 11:8  = q2 / BE AIFSN
++ * - bits 15:12 = q3 / BK AIFSN
++ * A programmed value of 0 keeps the legacy DIFS-compatible AIFSN=2 behavior
++ * in csma_ca.v for backward compatibility. */
++
++/* XPU_REG_AMPDU_RX_PEER_{LOW,HIGH} byte packing.
++ * RTL consumer: xpu.v / tx_control.v.
++ * Software producer: xpu.c XPU_REG_AMPDU_RX_PEER_ADDR_write().
++ * - LOW  register carries peer MAC bytes [0..3] in little-endian packing
++ * - HIGH register carries peer MAC bytes [4..5] in bits [15:0] */
 +
 +#define XPU_REG_TRX_STATUS_ADDR           (57*4)  /* RTL slv_reg57: RSSI, ch_idle, demod_ongoing, tx_ongoing */
 +#define XPU_REG_TSF_RUNTIME_VAL_LOW_ADDR  (58*4)
@@ -487,6 +566,12 @@ index 0000000..71787c7
 +
 +  void (*XPU_REG_MAC_ADDR_HIGH_write)(u32 value);
 +  u32  (*XPU_REG_MAC_ADDR_HIGH_read)(void);
++
++  void (*XPU_REG_AMPDU_RX_PEER_LOW_write)(u32 value);
++  u32  (*XPU_REG_AMPDU_RX_PEER_LOW_read)(void);
++
++  void (*XPU_REG_AMPDU_RX_PEER_HIGH_write)(u32 value);
++  u32  (*XPU_REG_AMPDU_RX_PEER_HIGH_read)(void);
 +
 +  void (*XPU_REG_BSSID_FILTER_LOW_write)(u32 value);
 +  u32  (*XPU_REG_BSSID_FILTER_LOW_read)(void);
@@ -560,6 +645,7 @@ index 0000000..71787c7
 +  u32  (*XPU_REG_AMPDU_ACTION_read)(void);
 +
 +  void (*XPU_REG_MAC_ADDR_write)(u8 *mac_addr);
++  void (*XPU_REG_AMPDU_RX_PEER_ADDR_write)(const u8 *peer_addr);
 +};
 +
 +#endif /* __HW_DEF_H_FILE__ */
@@ -1538,10 +1624,10 @@ index 0000000..79bd212
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/sdr.c b/drivers/sdr.c
 new file mode 100644
-index 0000000..9b5434e
+index 0000000..57335aa
 --- /dev/null
 +++ b/drivers/sdr.c
-@@ -0,0 +1,1722 @@
+@@ -0,0 +1,1786 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu, Jetmir Haxhibeqiri, Pablo Avila Campos
 +// SPDX-FileCopyrightText: 2022 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -1696,6 +1782,8 @@ index 0000000..9b5434e
 +u32 reverse32(u32 value);
 +static int openwifi_set_antenna(struct ieee80211_hw *dev, u32 tx_ant, u32 rx_ant);
 +static int openwifi_get_antenna(struct ieee80211_hw *dev, u32 *tx_ant, u32 *rx_ant);
++static void openwifi_reset_rx_ba_session_locked(struct openwifi_priv *priv);
++static void openwifi_reset_rx_ba_session(struct openwifi_priv *priv);
 +
 +//=============================================================================
 +// Local Interface Includes
@@ -1720,14 +1808,11 @@ index 0000000..9b5434e
 +//=============================================================================
 +
 +/* test_mode bits:
-+ * bit0: aggregation enable(1)/disable(0)
-+ * bit1: reserved (legacy TX offset toggle, no longer used)
 + * bit2: short GI enable(1)/disable(0)
++ * Other bits are ignored by the current driver.
 + */
-+#define OW_TEST_MODE_AGGR_MASK              (1U << 0)
 +#define OW_TEST_MODE_SHORT_GI_MASK          (1U << 2)
 +static int test_mode = 0;
-+static bool AGGR_ENABLE = false;
 +static bool TX_OFFSET_TUNING_ENABLE = false;
 +
 +static int init_tx_att = 0;
@@ -1738,7 +1823,7 @@ index 0000000..9b5434e
 +MODULE_LICENSE("GPL v2");
 +
 +module_param(test_mode, int, 0);
-+MODULE_PARM_DESC(test_mode, "test_mode bit0: aggregation, bit2: short GI (1=enable)");
++MODULE_PARM_DESC(test_mode, "test_mode bit2: short GI (1=enable); other bits ignored");
 +
 +module_param(init_tx_att, int, 0);
 +MODULE_PARM_DESC(init_tx_att, "Initial TX attenuation in mdB (e.g. 3000 means 3 dB attenuation)");
@@ -1775,6 +1860,11 @@ index 0000000..9b5434e
 +module_param(tx_timeout_warn_interval_ms, int, 0644);
 +MODULE_PARM_DESC(tx_timeout_warn_interval_ms,
 +  "TX DMA timeout warning interval in ms (100-10000, default 1000)");
++
++static bool wmm_force_on_all_be = false;
++module_param(wmm_force_on_all_be, bool, 0644);
++MODULE_PARM_DESC(wmm_force_on_all_be,
++  "Force WMM CW/AIFSN defaults when mac80211 programs all-BE after association (default 0)");
 +
 +/**
 + * @brief Initialize one software TX ring and descriptor table.
@@ -1903,11 +1993,12 @@ index 0000000..9b5434e
 +static void openwifi_classify_platform_from_model(struct openwifi_priv *priv, const char *fpga_model,
 +  const char *root_compatible)
 +{
++  priv->platform_is_cheshire = openwifi_platform_is_cheshire(fpga_model, root_compatible);
 +  /* Cheshire runs on ZCU104 (ZynqMP UltraScale+) with AD9361 — classify as
 +   * ZYNQMP_AD9361, not UNKNOWN_HARDWARE. The DTS uses "eth,cheshire" tokens
 +   * which don't match openwifi_platform_is_zynqmp_class() checks, so we map
 +   * it explicitly here. */
-+  if (openwifi_platform_is_cheshire(fpga_model, root_compatible)) {
++  if (priv->platform_is_cheshire) {
 +    priv->hardware_type = ZYNQMP_AD9361;
 +  } else if (openwifi_platform_is_zynqmp_class(fpga_model, root_compatible)) {
 +    priv->hardware_type = ZYNQMP_AD9361;
@@ -2181,7 +2272,12 @@ index 0000000..9b5434e
 +  priv->rx_dma_cb_last_full_jiffies = jiffies;
 +
 +  priv->rx_dma_wd_restart_count = 0;
-+  priv->tx_aggr_prev_valid = false;
++  memset(priv->tx_aggr_prev_valid, 0, sizeof(priv->tx_aggr_prev_valid));
++  memset(priv->tx_aggr_prev_key, 0, sizeof(priv->tx_aggr_prev_key));
++  priv->tx_pkt_info_last_valid = false;
++  memset(priv->tx_pkt_info_last, 0, sizeof(priv->tx_pkt_info_last));
++  priv->tx_pkt_info_latched_valid = false;
++  memset(priv->tx_pkt_info_latched, 0, sizeof(priv->tx_pkt_info_latched));
 +
 +  tx_dma_wait_us = clamp(tx_dma_wait_us, OW_TX_DMA_POLL_US_MIN, OW_TX_DMA_POLL_US_MAX);
 +  tx_dma_poll_step_us = clamp(tx_dma_poll_step_us, OW_TX_DMA_POLL_STEP_US_MIN, OW_TX_DMA_POLL_STEP_US_MAX);
@@ -2327,6 +2423,9 @@ index 0000000..9b5434e
 +    printk("%s openwifi_start: irq_tx %d\n", sdr_compatible_str, priv->irq_tx);
 +  }
 +
++  /* Reset RX BA software/hardware state before reopening RX interrupts. */
++  openwifi_reset_rx_ba_session(priv);
++
 +  rx_intf_api->RX_INTF_REG_INTERRUPT_TEST_write(OW_RX_INTERRUPT_TEST_ENABLE);
 +  tx_intf_api->TX_INTF_REG_INTERRUPT_SEL_write(OW_TX_INTF_INTERRUPT_ENABLE);
 +  /* Release M-AXIS after both RX/TX IRQ handlers are installed. */
@@ -2350,11 +2449,20 @@ index 0000000..9b5434e
 +   * 4. If AP is non-WMM, conf_tx() writes all-BE (0xA4A4A4A4) — these
 +   *    defaults provide correct WMM differentiation before that point */
 +  xpu_api->XPU_REG_CSMA_CFG_write(OW_CSMA_CFG_WMM_DEFAULT);
-+  printk(KERN_INFO "%s openwifi_start: wrote default WMM CW (OW_CSMA_CFG_WMM_DEFAULT)\n",
-+    sdr_compatible_str);
 +  xpu_api->XPU_REG_AIFS_CFG_write(OW_AIFS_CFG_WMM_DEFAULT);
-+  printk(KERN_INFO "%s openwifi_start: wrote default WMM AIFSN (OW_AIFS_CFG_WMM_DEFAULT)\n",
-+    sdr_compatible_str);
++  priv->requested_aifs[IEEE80211_AC_VO] = OW_AIFS_Q0_WMM_DEFAULT;
++  priv->requested_aifs[IEEE80211_AC_VI] = OW_AIFS_Q1_WMM_DEFAULT;
++  priv->requested_aifs[IEEE80211_AC_BE] = OW_AIFS_Q2_WMM_DEFAULT;
++  priv->requested_aifs[IEEE80211_AC_BK] = OW_AIFS_Q3_WMM_DEFAULT;
++  priv->requested_txop[IEEE80211_AC_VO] = 0;
++  priv->requested_txop[IEEE80211_AC_VI] = 0;
++  priv->requested_txop[IEEE80211_AC_BE] = 0;
++  priv->requested_txop[IEEE80211_AC_BK] = 0;
++  printk(KERN_INFO "%s openwifi_start: default CSMA_CFG=0x%08x AIFS_CFG=0x%08x AMPDU_ACTION=0x%08x\n",
++    sdr_compatible_str,
++    xpu_api->XPU_REG_CSMA_CFG_read(),
++    xpu_api->XPU_REG_AIFS_CFG_read(),
++    xpu_api->XPU_REG_AMPDU_ACTION_read());
 +
 +  openwifi_rx_dma_watchdog_arm(priv);
 +
@@ -2479,6 +2587,12 @@ index 0000000..9b5434e
 +    cancel_delayed_work_sync(&vif_priv->beacon_work);
 +    priv->vif[i] = NULL;
 +  }
++
++  priv->tx_pkt_info_last_valid = false;
++  memset(priv->tx_pkt_info_last, 0, sizeof(priv->tx_pkt_info_last));
++  priv->tx_pkt_info_latched_valid = false;
++  memset(priv->tx_pkt_info_latched, 0, sizeof(priv->tx_pkt_info_latched));
++  openwifi_reset_rx_ba_session(priv);
 +
 +  /* Cleanup order is reverse of acquisition in openwifi_start.
 +   * Stop DMA before freeing RX/TX buffers to avoid use-after-free. */
@@ -2619,10 +2733,8 @@ index 0000000..9b5434e
 +  if (test_mode & OW_TEST_MODE_SHORT_GI_MASK) {
 +    priv->band_2GHz.ht_cap.cap = IEEE80211_HT_CAP_SGI_20;
 +  }
-+  if (AGGR_ENABLE) {
-+    priv->band_2GHz.ht_cap.ampdu_factor = IEEE80211_HT_MAX_AMPDU_8K;
-+    priv->band_2GHz.ht_cap.ampdu_density = IEEE80211_HT_MPDU_DENSITY_2;
-+  }
++  priv->band_2GHz.ht_cap.ampdu_factor = IEEE80211_HT_MAX_AMPDU_8K;
++  priv->band_2GHz.ht_cap.ampdu_density = IEEE80211_HT_MPDU_DENSITY_2;
 +  memset(&priv->band_2GHz.ht_cap.mcs, 0, sizeof(priv->band_2GHz.ht_cap.mcs));
 +  priv->band_2GHz.ht_cap.mcs.rx_mask[0] = 0xff;
 +  priv->band_2GHz.ht_cap.mcs.tx_params = IEEE80211_HT_MCS_TX_DEFINED;
@@ -2637,10 +2749,8 @@ index 0000000..9b5434e
 +  if (test_mode & OW_TEST_MODE_SHORT_GI_MASK) {
 +    priv->band_5GHz.ht_cap.cap = IEEE80211_HT_CAP_SGI_20;
 +  }
-+  if (AGGR_ENABLE) {
-+    priv->band_5GHz.ht_cap.ampdu_factor = IEEE80211_HT_MAX_AMPDU_8K;
-+    priv->band_5GHz.ht_cap.ampdu_density = IEEE80211_HT_MPDU_DENSITY_2;
-+  }
++  priv->band_5GHz.ht_cap.ampdu_factor = IEEE80211_HT_MAX_AMPDU_8K;
++  priv->band_5GHz.ht_cap.ampdu_density = IEEE80211_HT_MPDU_DENSITY_2;
 +  memset(&priv->band_5GHz.ht_cap.mcs, 0, sizeof(priv->band_5GHz.ht_cap.mcs));
 +  priv->band_5GHz.ht_cap.mcs.rx_mask[0] = 0xff;
 +  priv->band_5GHz.ht_cap.mcs.tx_params = IEEE80211_HT_MCS_TX_DEFINED;
@@ -2662,14 +2772,19 @@ index 0000000..9b5434e
 +  ieee80211_hw_set(dev, RX_INCLUDES_FCS);
 +  ieee80211_hw_set(dev, BEACON_TX_STATUS);
 +  ieee80211_hw_set(dev, REPORTS_TX_ACK_STATUS);
++  /* Advertise A-MPDU support for the maintained one-peer RX BA contract.
++   * mac80211 exposes this as a global HW capability bit, while the current
++   * OpenWiFi contract is still limited to one active RX BA peer/TID session.
++   * TX aggregation is wired through mac80211/TX_INTF, RX BlockAck session
++   * state is programmed explicitly, and mac80211 keeps reorder buffering in
++   * software. Zynq still exposes AP mode, but additional AP-side RX BA peers
++   * are rejected at runtime instead of being represented as extra hardware
++   * session state. */
++  ieee80211_hw_set(dev, AMPDU_AGGREGATION);
 +  /* Intentionally do not advertise AP_LINK_PS.
 +   * OpenWiFi AP mode in this repo does not implement the mac80211 buffered-
 +   * frame/TIM hooks needed for AP-side station power save, and this project
 +   * does not plan to add that functionality. */
-+  /* Keep AMPDU_AGGREGATION disabled until RX BlockAck session management is
-+   * wired end-to-end. The TX path has partial aggregation support, but
-+   * openwifi_ampdu_action() RX_START/RX_STOP still do not configure real
-+   * receive-side BA state. */
 +  ieee80211_hw_set(dev, SIGNAL_DBM);
 +  wiphy_ext_feature_set(dev->wiphy, NL80211_EXT_FEATURE_CQM_RSSI_LIST);
 +
@@ -2677,14 +2792,28 @@ index 0000000..9b5434e
 +  dev->vif_data_size = sizeof(struct openwifi_vif);
 +  dev->queues = MAX_NUM_HW_QUEUE;
 +  /* Hardware register model supports one active VIF context at a time
-+   * (OW_MAX_ACTIVE_VIF). We still advertise supported iftypes here for
-+   * compatibility, while add_interface enforces the active-VIF limit. */
++   * (OW_MAX_ACTIVE_VIF). Keep AP+STA+monitor exposed on both Zynq and
++   * Cheshire so Cheshire/CVA6 can still run controlled AP-side Wi-Fi tests
++   * even without an Ethernet uplink.
++   *
++   * NOTE(openwifi-cheshire-ap-test): Cheshire AP exposure is intentional and
++   * must not be narrowed back to STA-only without explicit review. The point
++   * is controlled Wi-Fi-side testing/bring-up, not Ethernet-backed product
++   * AP deployment.
++   *
++   * RX BA offload remains narrower than generic AP admission: only one active
++   * peer/TID session is supported at a time, and additional AP-side RX BA
++   * sessions are rejected at runtime. IBSS/mesh are intentionally not
++   * advertised. */
 +  dev->wiphy->interface_modes =
 +      BIT(NL80211_IFTYPE_MONITOR) |
 +      BIT(NL80211_IFTYPE_AP) |
-+      BIT(NL80211_IFTYPE_STATION) |
-+      BIT(NL80211_IFTYPE_ADHOC) |
-+      BIT(NL80211_IFTYPE_MESH_POINT);
++      BIT(NL80211_IFTYPE_STATION);
++  /* 0 means "do not advertise a driver-side AP association limit" in
++   * cfg80211/nl80211. Keep AP admission uncapped here; the actual narrow
++   * point remains RX BA offload, which still supports only one active
++   * peer/TID session at a time. */
++  dev->wiphy->max_ap_assoc_sta = 0;
 +  dev->wiphy->iface_combinations = &openwifi_if_comb;
 +  dev->wiphy->n_iface_combinations = 1;
 +  dev->wiphy->available_antennas_tx = NUM_TX_ANT_MASK;
@@ -2723,6 +2852,8 @@ index 0000000..9b5434e
 +    priv->stat.tx_queue_stop0_real_num[idx_hw_queue] = 0;
 +    priv->stat.tx_queue_stop1_num[idx_hw_queue] = 0;
 +    priv->stat.tx_queue_wakeup_num[idx_hw_queue] = 0;
++    priv->requested_aifs[idx_hw_queue] = 0;
++    priv->requested_txop[idx_hw_queue] = 0;
 +  }
 +
 +  priv->stat.tx_data_pkt_need_ack_num_total = 0;
@@ -2771,6 +2902,22 @@ index 0000000..9b5434e
 +  priv->stat.tx_bounce_buf_count = 0;
 +  priv->stat.tx_tailroom_expand_count = 0;
 +  priv->stat.tx_vo_promote_count = 0;
++  priv->stat.tx_ampdu_tx_start_count = 0;
++  priv->stat.tx_ampdu_tx_stop_count = 0;
++  priv->stat.tx_ampdu_tx_operational_count = 0;
++  priv->stat.tx_ampdu_ba_nonzero_bitmap_count = 0;
++  priv->stat.tx_ampdu_ba_zero_bitmap_count = 0;
++  priv->stat.tx_ampdu_no_ba_count = 0;
++  priv->stat.tx_ampdu_unexpected_ack_count = 0;
++  priv->stat.rx_ampdu_start_count = 0;
++  priv->stat.rx_ampdu_stop_count = 0;
++  priv->stat.rx_ampdu_reject_count = 0;
++  priv->rx_ba_active = false;
++  priv->rx_ba_tid = 0;
++  priv->rx_ba_ssn = 0;
++  priv->rx_ba_buf_size = 0;
++  priv->rx_ba_timeout_tu = 0;
++  eth_zero_addr(priv->rx_ba_peer_addr);
 +}
 +
 +/**
@@ -2949,7 +3096,8 @@ index 0000000..9b5434e
 +  priv->use_short_slot = false; // updated by openwifi_bss_info_changed: BSS_CHANGED_ERP_SLOT
 +  priv->ampdu_reference = 0;
 +  priv->last_tx_quad_cal_lo = OW_RF_INIT_LO_MHZ;
-+  priv->tx_aggr_prev_valid = false;
++  memset(priv->tx_aggr_prev_valid, 0, sizeof(priv->tx_aggr_prev_valid));
++  memset(priv->tx_aggr_prev_key, 0, sizeof(priv->tx_aggr_prev_key));
 +
 +  /* Find ad9361-phy driver for LO/channel control. */
 +  tmp_dev = bus_find_device(&spi_bus_type, NULL, "ad9361-phy", custom_match_spi_dev);
@@ -3028,8 +3176,10 @@ index 0000000..9b5434e
 +  printk("%s openwifi_dev_probe: cf_axi_dds_datasel DATA_SEL_DMA\n", sdr_compatible_str);
 +#endif
 +
-+  /* Parse test_mode input. */
-+  AGGR_ENABLE = ((test_mode & OW_TEST_MODE_AGGR_MASK) != 0);
++  if (test_mode & ~OW_TEST_MODE_SHORT_GI_MASK) {
++    printk(KERN_INFO "%s openwifi_dev_probe: ignoring unsupported test_mode bits 0x%x\n",
++      sdr_compatible_str, test_mode & ~OW_TEST_MODE_SHORT_GI_MASK);
++  }
 +
 +  priv->rssi_correction = rssi_correction_lookup_table(OW_DEFAULT_RSSI_CORR_FREQ_MHZ);
 +  priv->last_auto_fpga_lbt_th = rssi_dbm_to_rssi_half_db(OW_DEFAULT_DEMOD_TH_DBM, priv->rssi_correction);
@@ -3061,8 +3211,8 @@ index 0000000..9b5434e
 +    goto err_free_dev;
 +  }
 +
-+  printk("%s openwifi_dev_probe: test_mode %x AGGR_ENABLE %d TX_OFFSET_TUNING_ENABLE %d init_tx_att %d\n",
-+    sdr_compatible_str, test_mode, AGGR_ENABLE, TX_OFFSET_TUNING_ENABLE, init_tx_att);
++  printk("%s openwifi_dev_probe: test_mode %x TX_OFFSET_TUNING_ENABLE %d init_tx_att %d\n",
++    sdr_compatible_str, test_mode, TX_OFFSET_TUNING_ENABLE, init_tx_att);
 +
 +  if (priv->tx_intf_cfg == TX_INTF_BW_20MHZ_AT_0MHZ_ANT0
 +      || priv->tx_intf_cfg == TX_INTF_BW_20MHZ_AT_N_10MHZ_ANT0) {
@@ -3266,10 +3416,10 @@ index 0000000..9b5434e
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..1d0b9bb
+index 0000000..17628c2
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,998 @@
+@@ -0,0 +1,1054 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3374,13 +3524,31 @@ index 0000000..1d0b9bb
 +  void          *bounce_buf;
 +};
 +
++/**
++ * @brief Aggregate-boundary key for maintained TX A-MPDU continuity.
++ *
++ * The driver starts a new aggregate whenever any field in this key changes.
++ * The queue field is the actual programmed hardware queue after any local
++ * driver remap, not the original mac80211 priority.
++ */
++struct ow_tx_aggr_key {
++  u32    addr1_low32;
++  u16    addr1_high16;
++  __le16 duration_id;
++  u8     rate_hw_value;
++  u8     pkt_need_ack;
++  u8     hw_queue;
++  u8     qos_tid;
++  u8     retry_limit_raw;
++  u8     use_short_gi;
++};
++
 +/* Maximum TX completions deferred to Phase TX-B (unlocked) per interrupt.
-+ * Completions beyond this budget fall back to inline processing under
-+ * priv->lock, which calls ieee80211_tx_status_irqsafe under lock — safe
-+ * on UP but a latent lock-ordering concern on SMP.  Keep this large enough
-+ * that the overflow path is effectively unreachable.  16 uses ~384 bytes
-+ * of stack (16 * sizeof(ow_tx_done_entry)), well within kernel 8 KB. */
-+#define OW_TX_DONE_BUDGET  16U
++ * Size this high enough to absorb most aggregate completions without tripping
++ * the kernel frame-size warning on the maintained targets. 56 entries keep the
++ * stack frame below the 2 KiB warning threshold while still making the inline
++ * overflow path much rarer than the original 16-entry budget. */
++#define OW_TX_DONE_BUDGET  56U
 +
 +struct openwifi_vif {
 +  struct ieee80211_hw *dev;
@@ -3553,6 +3721,14 @@ index 0000000..1d0b9bb
 +#define OW_CSMA_CFG_ALL_BE                  0xA4A4A4A4U
 +#define OW_CSMA_CFG_WMM_DEFAULT             0xA4A44332U
 +#define OW_AIFS_CFG_WMM_DEFAULT             0x00007322U
++#define OW_AIFS_Q0_WMM_DEFAULT              2U
++#define OW_AIFS_Q1_WMM_DEFAULT              2U
++#define OW_AIFS_Q2_WMM_DEFAULT              3U
++#define OW_AIFS_Q3_WMM_DEFAULT              7U
++#define OW_AMPDU_RX_ACTION_ENABLE           0x80000000U
++#define OW_AMPDU_RX_ACTION_TID_SHIFT        1U
++#define OW_AMPDU_RX_ACTION_TID_MASK         0x0FU
++#define OW_AMPDU_RX_ACTION_CLEAR_PULSE      0x00000001U
 +
 +#define OW_SPI_DISABLE_DISABLE              0U
 +#define OW_SPI_DISABLE_ENABLE               1U
@@ -3898,11 +4074,7 @@ index 0000000..1d0b9bb
 +
 +static const struct ieee80211_iface_limit openwifi_if_limits[] = {
 +  { .max = OW_MAX_ACTIVE_VIF,  .types = BIT(NL80211_IFTYPE_STATION) },
-+  { .max = OW_MAX_ACTIVE_VIF,  .types =
-+#ifdef CONFIG_MAC80211_MESH
-+                                  BIT(NL80211_IFTYPE_MESH_POINT) |
-+#endif
-+                                  BIT(NL80211_IFTYPE_AP)},
++  { .max = OW_MAX_ACTIVE_VIF,  .types = BIT(NL80211_IFTYPE_AP)},
 +};
 +
 +static const struct ieee80211_iface_combination openwifi_if_comb = {
@@ -4081,6 +4253,16 @@ index 0000000..1d0b9bb
 +  u32 tx_bounce_buf_count;
 +  u32 tx_tailroom_expand_count;
 +  u32 tx_vo_promote_count;
++  u32 tx_ampdu_tx_start_count;
++  u32 tx_ampdu_tx_stop_count;
++  u32 tx_ampdu_tx_operational_count;
++  u32 tx_ampdu_ba_nonzero_bitmap_count;
++  u32 tx_ampdu_ba_zero_bitmap_count;
++  u32 tx_ampdu_no_ba_count;
++  u32 tx_ampdu_unexpected_ack_count;
++  u32 rx_ampdu_start_count;
++  u32 rx_ampdu_stop_count;
++  u32 rx_ampdu_reject_count;
 +};
 +
 +//=============================================================================
@@ -4103,6 +4285,7 @@ index 0000000..1d0b9bb
 +  const struct openwifi_rf_ops *rf;
 +  enum openwifi_hardware_type  hardware_type;
 +  enum openwifi_fpga_type      fpga_type;
++  bool                         platform_is_cheshire;
 +
 +#ifndef ENABLE_DIRECT_DAC_MODE
 +  struct cf_axi_dds_state      *dds_st;  //axi_ad9361 hdl ref design module, dac channel
@@ -4177,6 +4360,21 @@ index 0000000..1d0b9bb
 +  u8   band;
 +
 +  u32 ampdu_reference;
++  /* Current RX BlockAck session contract:
++   * - one active peer/TID session at a time
++   * - used for STA operation and for AP mode when one peer owns RX BA
++   * - hardware enforces sender peer + TID before updating BA state
++   * - mac80211 keeps reorder buffering in software */
++  bool rx_ba_active;
++  u8   rx_ba_tid;
++  u16  rx_ba_ssn;
++  u16  rx_ba_buf_size;
++  u16  rx_ba_timeout_tu;
++  u8   rx_ba_peer_addr[ETH_ALEN];
++  /* Last mac80211-requested EDCA values for observability.
++   * Queue order: q0=VO, q1=VI, q2=BE, q3=BK. */
++  u16  requested_aifs[MAX_NUM_HW_QUEUE];
++  u16  requested_txop[MAX_NUM_HW_QUEUE];
 +  u8  rx_target_buf_idx_old;
 +
 +  /* Re-entrancy guard for openwifi_rx_interrupt (bit 0).
@@ -4196,15 +4394,23 @@ index 0000000..1d0b9bb
 +   * slot 0, which can starve high-numbered slots under sustained load.
 +   * Advanced in Phase RX-A to one past the last scanned position. */
 +  u8  rx_scan_start_idx;
-+  bool tx_aggr_prev_valid;
-+  u32 tx_aggr_prev_addr1_low32;
-+  u16 tx_aggr_prev_addr1_high16;
-+  __le16 tx_aggr_prev_duration_id;
-+  u8 tx_aggr_prev_rate_hw_value;
-+  u8 tx_aggr_prev_pkt_need_ack;
-+  u8 tx_aggr_prev_prio;
-+  u8 tx_aggr_prev_retry_limit_raw;
-+  u8 tx_aggr_prev_use_short_gi;
++  /* Aggregate-boundary cache is per hardware queue.
++   * TODO(openwifi-aggr-flow-table): if runtime validation still shows same-
++   * queue mixed traffic breaking continuity materially, promote this to a
++   * fuller per-(STA,TID,queue) table instead of one entry per queue. */
++  bool                 tx_aggr_prev_valid[MAX_NUM_HW_QUEUE];
++  struct ow_tx_aggr_key tx_aggr_prev_key[MAX_NUM_HW_QUEUE];
++  /* Live TX completion snapshot written by TX IRQ under priv->lock.
++   * SDRCTL must not read this tuple directly word-by-word because a later TX
++   * IRQ can otherwise mix fields from different completions. */
++  bool                 tx_pkt_info_last_valid;
++  u32                  tx_pkt_info_last[4];
++  /* Latched debug tuple served through SDRCTL PKT_INFO1-4.
++   * PKT_INFO1 snapshots tx_pkt_info_last[] into this cache under priv->lock,
++   * and PKT_INFO2-4 keep returning the same latched view until the next
++   * PKT_INFO1 refresh. */
++  bool                 tx_pkt_info_latched_valid;
++  u32                  tx_pkt_info_latched[4];
 +
 +  u32 drv_rx_reg_val[MAX_NUM_DRV_REG];
 +  u32 drv_tx_reg_val[MAX_NUM_DRV_REG];
@@ -4270,15 +4476,23 @@ index 0000000..1d0b9bb
 +#endif /* OPENWIFI_SDR */
 diff --git a/drivers/sdr_mac_ops.c b/drivers/sdr_mac_ops.c
 new file mode 100644
-index 0000000..28e67e0
+index 0000000..0ed3413
 --- /dev/null
 +++ b/drivers/sdr_mac_ops.c
-@@ -0,0 +1,731 @@
+@@ -0,0 +1,987 @@
 +/**
 + * @file sdr_mac_ops.c
 + * @brief mac80211 operation callbacks for the OpenWiFi SDR driver.
 + *
 + * Included only by sdr.c (single translation unit split).
++ *
++ * Policy notes:
++ * - TX AMPDU stays enabled, but RX BA remains a one-session peer/TID model.
++ * - RX BA lifecycle teardown is centralized so start/stop/disassoc/restart do
++ *   not drift apart over time.
++ * - Safe WMM defaults are still programmed at startup, but post-association
++ *   EDCA follows mac80211 by default. The old all-BE-to-WMM rewrite is now an
++ *   explicit opt-in workaround, not an always-on policy.
 + */
 +
 +//=============================================================================
@@ -4312,7 +4526,6 @@ index 0000000..28e67e0
 +#define OW_CONF_TX_AIFS_Q3_CLEAR_MASK        0xFFFF0FFFU
 +#define OW_FILTER_MONITOR_FLAGS_MASK         0xF0U
 +#define OW_FILTER_MONITOR_FLAGS_EXPECTED     OW_FILTER_MONITOR_FLAGS_MASK
-+#define OW_AMPDU_TX_OPERATIONAL_BUF_SIZE     4U
 +#define OW_FILTER_MONITOR_ALL_SHIFT          13U
 +#define OW_FILTER_MY_BEACON_SHIFT            12U
 +#define OW_FILTER_BROADCAST_ALL_ZERO_SHIFT   11U
@@ -4326,10 +4539,8 @@ index 0000000..28e67e0
 +#define OW_FILTER_FIF_FCSFAIL_SHIFT          2U  /* RTL pkt_filter_ctl.v: 14'b00000000000100 */
 +#define OW_FILTER_FIF_PLCPFAIL_SHIFT         3U  /* RTL pkt_filter_ctl.v: 14'b00000000001000 */
 +#define OW_FILTER_FIF_ALLMULTI_SHIFT         1U
-+/* RTL tx_bit_intf.v:237 reads density from ampdu_action_config[24:22] (LSB=22).
-+ * Was incorrectly 24U — caused 2-bit mismatch for all non-zero density values. */
-+#define OW_AMPDU_DENSITY_SHIFT               22U
-+#define OW_AMPDU_BUF_SIZE_SHIFT              16U
++#define OW_AMPDU_BUF_SIZE_MAX                63U
++#define OW_AMPDU_STATUS_SAFE_BUF_SIZE_MAX    OW_TX_DONE_BUDGET
 +#define OW_BSSID_LOW_SHIFT_1                 8U
 +#define OW_BSSID_LOW_SHIFT_2                 16U
 +#define OW_BSSID_LOW_SHIFT_3                 24U
@@ -4345,6 +4556,128 @@ index 0000000..28e67e0
 +#define OW_CW_EXP_SHIFT_6                    24U
 +#define OW_CW_EXP_SHIFT_7                    28U
 +#define OW_TSF_STABLE_READ_MAX_RETRIES       8U
++
++/**
++ * @brief Cache mac80211-requested EDCA parameters for one access category.
++ *
++ * @param priv Driver private state.
++ * @param queue Queue index in IEEE80211_AC_* order.
++ * @param params Requested queue parameters from mac80211.
++ */
++static void openwifi_cache_edca_params(
++  struct openwifi_priv *priv,
++  u16 queue,
++  const struct ieee80211_tx_queue_params *params)
++{
++  priv->requested_aifs[queue] = params->aifs;
++  priv->requested_txop[queue] = params->txop;
++}
++
++/**
++ * @brief Program the XPU RX BlockAck session control register.
++ *
++ * Register contract:
++ * - bit31: RX BA session enable
++ * - bits4:1: active TID
++ * - bit0: clear/start pulse
++ *
++ * @param rx_ba_active True when the RX BA session should remain enabled.
++ * @param tid Active TID to expose to the RTL.
++ * @param pulse_clear True to emit the clear/start pulse.
++ */
++static void openwifi_write_ampdu_rx_action(bool rx_ba_active, u8 tid, bool pulse_clear)
++{
++  u32 reg_val;
++
++  reg_val = ((u32)tid & OW_AMPDU_RX_ACTION_TID_MASK) << OW_AMPDU_RX_ACTION_TID_SHIFT;
++  if (rx_ba_active) {
++    reg_val |= OW_AMPDU_RX_ACTION_ENABLE;
++  }
++
++  xpu_api->XPU_REG_AMPDU_ACTION_write(reg_val);
++  if (pulse_clear) {
++    xpu_api->XPU_REG_AMPDU_ACTION_write(reg_val | OW_AMPDU_RX_ACTION_CLEAR_PULSE);
++    xpu_api->XPU_REG_AMPDU_ACTION_write(reg_val);
++  }
++}
++
++/**
++ * @brief Clear the cached single-session RX BlockAck state.
++ *
++ * @param priv Driver private state.
++ */
++static void openwifi_clear_rx_ba_state(struct openwifi_priv *priv)
++{
++  priv->rx_ba_active = false;
++  priv->rx_ba_tid = 0;
++  priv->rx_ba_ssn = 0;
++  priv->rx_ba_buf_size = 0;
++  priv->rx_ba_timeout_tu = 0;
++  eth_zero_addr(priv->rx_ba_peer_addr);
++}
++
++/**
++ * @brief Program the XPU RX BlockAck peer match register pair.
++ *
++ * The current hardware contract binds RX BA state to one peer/TID session.
++ * BAR acceptance and RX A-MPDU bitmap updates therefore use both the active
++ * TID and this programmed sender MAC.
++ *
++ * @param peer_addr Peer MAC address, or NULL to clear the match.
++ */
++static void openwifi_write_ampdu_rx_peer(const u8 *peer_addr)
++{
++  xpu_api->XPU_REG_AMPDU_RX_PEER_ADDR_write(peer_addr);
++}
++
++/**
++ * @brief Clear cached RX BA state and matching XPU registers under lock.
++ *
++ * @param priv Driver private state. Caller must hold @c priv->lock.
++ */
++static void openwifi_reset_rx_ba_session_locked(struct openwifi_priv *priv)
++{
++  openwifi_clear_rx_ba_state(priv);
++  openwifi_write_ampdu_rx_peer(NULL);
++  openwifi_write_ampdu_rx_action(false, 0, true);
++}
++
++/**
++ * @brief Clear cached RX BA state and matching XPU registers.
++ *
++ * @param priv Driver private state.
++ */
++static void openwifi_reset_rx_ba_session(struct openwifi_priv *priv)
++{
++  unsigned long flags;
++
++  spin_lock_irqsave(&priv->lock, flags);
++  openwifi_reset_rx_ba_session_locked(priv);
++  spin_unlock_irqrestore(&priv->lock, flags);
++}
++
++/**
++ * @brief Check whether the VIF type can use the current RX BA session model.
++ *
++ * The maintained hardware contract is still one active peer/TID at a time.
++ * That contract serves STA operation and the current AP test path on both
++ * Zynq and Cheshire. Cheshire AP exposure is intentional for controlled
++ * Wi-Fi-side testing and should not be narrowed away casually; additional RX
++ * BA sessions are still rejected at runtime instead of being hidden behind an
++ * advertised one-station AP cap.
++ *
++ * @param vif Virtual interface for the AMPDU action.
++ * @return True when the VIF type can use RX BA session control.
++ */
++static bool openwifi_vif_supports_rx_ba(const struct ieee80211_vif *vif)
++{
++  if (!vif) {
++    return false;
++  }
++
++  return (vif->type == NL80211_IFTYPE_STATION ||
++    vif->type == NL80211_IFTYPE_AP);
++}
 +
 +/**
 + * @brief Read current TSF timer value from FPGA registers.
@@ -4489,9 +4822,7 @@ index 0000000..28e67e0
 +  switch (vif->type) {
 +  case NL80211_IFTYPE_AP:
 +  case NL80211_IFTYPE_STATION:
-+  case NL80211_IFTYPE_ADHOC:
 +  case NL80211_IFTYPE_MONITOR:
-+  case NL80211_IFTYPE_MESH_POINT:
 +    break;
 +  default:
 +    return -EOPNOTSUPP;
@@ -4559,6 +4890,7 @@ index 0000000..28e67e0
 +{
 +  struct openwifi_vif *vif_priv;
 +  struct openwifi_priv *priv = dev->priv;
++  unsigned long flags;
 +
 +  vif_priv = (struct openwifi_vif *)&vif->drv_priv;
 +  vif_priv->enable_beacon = false;
@@ -4574,8 +4906,47 @@ index 0000000..28e67e0
 +    vif_priv->tailroom_added = false;
 +  }
 +
++  spin_lock_irqsave(&priv->lock, flags);
++  openwifi_reset_rx_ba_session_locked(priv);
++  spin_unlock_irqrestore(&priv->lock, flags);
++
 +  priv->vif[vif_priv->idx] = NULL;
 +  printk("%s openwifi_remove_interface vif idx %d\n", sdr_compatible_str, vif_priv->idx);
++}
++
++/**
++ * @brief Clear RX BA state when mac80211 removes a tracked station.
++ *
++ * The one-active-peer RX BA model must not retain stale peer/TID state after a
++ * station disappears, which matters for the preserved AP path as well as STA
++ * reconnect sequencing.
++ *
++ * @param dev mac80211 hardware handle.
++ * @param vif Virtual interface that owned the station.
++ * @param sta Station being removed.
++ * @return 0 after applying the teardown policy.
++ */
++static int openwifi_sta_remove(
++  struct ieee80211_hw *dev,
++  struct ieee80211_vif *vif,
++  struct ieee80211_sta *sta)
++{
++  struct openwifi_priv *priv = dev->priv;
++  unsigned long flags;
++
++  (void)vif;
++
++  if (!sta) {
++    return 0;
++  }
++
++  spin_lock_irqsave(&priv->lock, flags);
++  if (priv->rx_ba_active && ether_addr_equal(priv->rx_ba_peer_addr, sta->addr)) {
++    openwifi_reset_rx_ba_session_locked(priv);
++  }
++  spin_unlock_irqrestore(&priv->lock, flags);
++
++  return 0;
 +}
 +
 +//=============================================================================
@@ -4636,6 +5007,7 @@ index 0000000..28e67e0
 +  struct openwifi_vif *vif_priv;
 +  u32 bssid_low, bssid_high;
 +  bool new_short_slot;
++  unsigned long flags;
 +
 +  vif_priv = (struct openwifi_vif *)&vif->drv_priv;
 +
@@ -4692,6 +5064,16 @@ index 0000000..28e67e0
 +    vif_priv->enable_beacon = info->enable_beacon;
 +  }
 +
++  if (changed & BSS_CHANGED_ASSOC) {
++    printk_ratelimited(KERN_DEBUG "%s openwifi_bss_info_changed BSS_CHANGED_ASSOC assoc %d\n",
++      sdr_compatible_str, info->assoc);
++    if (!info->assoc) {
++      spin_lock_irqsave(&priv->lock, flags);
++      openwifi_reset_rx_ba_session_locked(priv);
++      spin_unlock_irqrestore(&priv->lock, flags);
++    }
++  }
++
 +  if (changed & (BSS_CHANGED_BEACON_ENABLED | BSS_CHANGED_BEACON)) {
 +    cancel_delayed_work_sync(&vif_priv->beacon_work);
 +    if (vif_priv->enable_beacon) {
@@ -4715,9 +5097,14 @@ index 0000000..28e67e0
 + * Current behavior:
 + * - Applies CW min/max to the hardware CSMA register.
 + * - Applies per-queue AIFSN to the hardware AIFS register.
-+ * - Logs txop but does not program it.
++ * - Caches requested TXOP values for observability but does not program them.
 + *
 + * TXOP remains unsupported in the current FPGA path.
++ *
++ * NOTE(openwifi-aifsn-always):
++ * AIFSN follows mac80211 on every conf_tx() call even when cw_max_min_cfg
++ * overrides CW min/max. The sysfs CW override is therefore not a freeze-all
++ * EDCA mode; it only overrides the CW register packing.
 + */
 +static int openwifi_conf_tx(
 +  struct ieee80211_hw *dev,
@@ -4730,9 +5117,35 @@ index 0000000..28e67e0
 +  u32 cw_pair_field;
 +  (void)vif;
 +
++  if (queue >= MAX_NUM_HW_QUEUE) {
++    printk("%s openwifi_conf_tx: WARNING queue %d does not exist\n", sdr_compatible_str, queue);
++    return -EINVAL;
++  }
++
++  openwifi_cache_edca_params(priv, queue, params);
++
 +  aifs_reg_val = xpu_api->XPU_REG_AIFS_CFG_read();
++  switch (queue) {
++  case IEEE80211_AC_VO:
++    aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q0_CLEAR_MASK)
++      | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q0_SHIFT);
++    break;
++  case IEEE80211_AC_VI:
++    aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q1_CLEAR_MASK)
++      | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q1_SHIFT);
++    break;
++  case IEEE80211_AC_BE:
++    aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q2_CLEAR_MASK)
++      | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q2_SHIFT);
++    break;
++  case IEEE80211_AC_BK:
++    aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q3_CLEAR_MASK)
++      | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q3_SHIFT);
++    break;
++  }
++
 +  if (priv->stat.cw_max_min_cfg == 0) {
-+    printk("%s openwifi_conf_tx: [queue %d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d, txop ignored\n",
++    printk("%s openwifi_conf_tx: [queue %d], aifs: %d, cw_min: %d, cw_max: %d, txop: %d, txop unsupported\n",
 +      sdr_compatible_str, queue, params->aifs, params->cw_min, params->cw_max, params->txop);
 +
 +    reg_val = xpu_api->XPU_REG_CSMA_CFG_read();
@@ -4742,27 +5155,16 @@ index 0000000..28e67e0
 +    switch (queue) {
 +    case IEEE80211_AC_VO:
 +      reg_val = (reg_val & OW_CONF_TX_Q0_CLEAR_MASK) | (cw_pair_field << OW_CONF_TX_Q0_SHIFT);
-+      aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q0_CLEAR_MASK)
-+        | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q0_SHIFT);
 +      break;
 +    case IEEE80211_AC_VI:
 +      reg_val = (reg_val & OW_CONF_TX_Q1_CLEAR_MASK) | (cw_pair_field << OW_CONF_TX_Q1_SHIFT);
-+      aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q1_CLEAR_MASK)
-+        | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q1_SHIFT);
 +      break;
 +    case IEEE80211_AC_BE:
 +      reg_val = (reg_val & OW_CONF_TX_Q2_CLEAR_MASK) | (cw_pair_field << OW_CONF_TX_Q2_SHIFT);
-+      aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q2_CLEAR_MASK)
-+        | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q2_SHIFT);
 +      break;
 +    case IEEE80211_AC_BK:
 +      reg_val = (reg_val & OW_CONF_TX_Q3_CLEAR_MASK) | (cw_pair_field << OW_CONF_TX_Q3_SHIFT);
-+      aifs_reg_val = (aifs_reg_val & OW_CONF_TX_AIFS_Q3_CLEAR_MASK)
-+        | ((params->aifs & OW_CONF_TX_AIFS_FIELD_MASK) << OW_CONF_TX_AIFS_Q3_SHIFT);
 +      break;
-+    default:
-+      printk("%s openwifi_conf_tx: WARNING queue %d does not exist\n", sdr_compatible_str, queue);
-+      return -EINVAL;
 +    }
 +  } else {
 +    reg_val = priv->stat.cw_max_min_cfg;
@@ -4781,7 +5183,7 @@ index 0000000..28e67e0
 +  xpu_api->XPU_REG_CSMA_CFG_write(reg_val);
 +  xpu_api->XPU_REG_AIFS_CFG_write(aifs_reg_val);
 +
-+  /* DELIBERATE mac80211 CW override for research driver (like max_rates=4):
++  /* Optional all-BE workaround:
 +   *
 +   * After writing, check if all 4 queues ended up with identical BE CW.
 +   * 0xA4A4A4A4 = all queues CW[15,1023]: each byte 0xA4 encodes
@@ -4793,17 +5195,9 @@ index 0000000..28e67e0
 +   * (intentional by mac80211 — ieee80211_sta_wmm_params only installs real WMM
 +   * params when AP advertises WMM IE), or (c) post-deauth reset before WMM IE.
 +   *
-+   * Without this override, VO queue promotion (sdr_tx.c) routes TCP ACKs to
-+   * queue 0, but queue 0 has the same CW as queue 2 — zero benefit.
-+   * When the AP sends a real WMM IE, conf_tx is called again with correct
-+   * per-queue values and the override below won't trigger.
-+   *
-+   * TODO(openwifi-wmm-cw-override): This overrides mac80211's intentional
-+   * non-WMM fallback.  On a non-WMM AP, 802.11 spec says all queues should
-+   * be equal.  This hack restores CW differentiation only; it does NOT
-+   * rewrite AIFSN.  To make it proper: either (a) only override during the
-+   * post-deauth transient window, not for genuine non-WMM APs, or (b) accept
-+   * the spec violation as a permanent research-platform optimization. */
++   * The default behavior now honors mac80211 exactly after association.
++   * If the old research workaround is still desired for experiments, it can
++   * be re-enabled explicitly with module parameter wmm_force_on_all_be=1. */
 +  /* Check for all-BE CW only after the LAST queue (BK=3) is configured.
 +   * mac80211 calls conf_tx once per queue sequentially (0,1,2,3).  Checking
 +   * after each queue risks triggering on intermediate states where Q0/Q1
@@ -4820,9 +5214,15 @@ index 0000000..28e67e0
 +   * (c) ALL 4 queues ended up as BE (OW_CSMA_CFG_ALL_BE). */
 +  if (queue == IEEE80211_AC_BK && priv->stat.cw_max_min_cfg == 0 &&
 +      reg_val == OW_CSMA_CFG_ALL_BE) {
-+    xpu_api->XPU_REG_CSMA_CFG_write(OW_CSMA_CFG_WMM_DEFAULT);
-+    printk(KERN_INFO "%s openwifi_conf_tx: all-BE CW detected after Q3, "
-+      "overriding with WMM CW defaults only\n", sdr_compatible_str);
++    if (wmm_force_on_all_be) {
++      xpu_api->XPU_REG_CSMA_CFG_write(OW_CSMA_CFG_WMM_DEFAULT);
++      xpu_api->XPU_REG_AIFS_CFG_write(OW_AIFS_CFG_WMM_DEFAULT);
++      printk(KERN_INFO "%s openwifi_conf_tx: all-BE CW detected after Q3, "
++        "forcing WMM CW+AIFSN defaults due to wmm_force_on_all_be=1\n", sdr_compatible_str);
++    } else {
++      printk(KERN_INFO "%s openwifi_conf_tx: all-BE CW detected after Q3, "
++        "honoring mac80211 non-WMM/default EDCA request\n", sdr_compatible_str);
++    }
 +  }
 +
 +  return 0;
@@ -4907,23 +5307,32 @@ index 0000000..28e67e0
 +/**
 + * @brief Handle AMPDU state machine callbacks from mac80211.
 + *
-+ * mac80211 source references for expected params->sta population:
-+ * - adi-linux-64/net/mac80211/agg-tx.c
-+ * - adi-linux-64/net/mac80211/agg-rx.c
++ * mac80211 source references for expected RX/TX callback ordering live in
++ * net/mac80211/agg-tx.c and net/mac80211/agg-rx.c in the active kernel tree.
 + *
 + * @param hw mac80211 hardware handle.
 + * @param vif Virtual interface.
 + * @param params AMPDU action parameters.
 + * @return 0 on handled actions, -EOPNOTSUPP otherwise.
++ *
++ * Current RX scope:
++ * - one active RX BlockAck peer/TID session at a time
++ * - RX BA start/stop is implemented for STA and the current AP path
++ * - additional AP-side RX BA sessions are rejected with -EBUSY
++ * - fuller AP multi-peer RX BA remains future work
++ * - hardware enforces both the negotiated sender address and TID
++ * - TX operational buf_size is clamped to the maintained deferred-status budget
++ * - mac80211 software reorder remains enabled
 + */
 +static int openwifi_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_ampdu_params *params)
 +{
++  struct openwifi_priv *priv = hw->priv;
 +  struct ieee80211_sta *sta;
 +  enum ieee80211_ampdu_mlme_action action;
 +  u16 max_tx_bytes;
 +  u16 buf_size;
 +  u32 ampdu_action_config;
-+  (void)hw;
++  unsigned long flags;
 +
 +  if (!params) {
 +    return -EINVAL;
@@ -4931,16 +5340,13 @@ index 0000000..28e67e0
 +  sta = params->sta;
 +  action = params->action;
 +
-+  if (!AGGR_ENABLE) {
-+    return -EOPNOTSUPP;
-+  }
-+
 +  switch (action) {
 +  case IEEE80211_AMPDU_TX_START:
 +    if (!sta) {
 +      return -EINVAL;
 +    }
 +    ieee80211_start_tx_ba_cb_irqsafe(vif, sta->addr, params->tid);
++    OW_U32_INC(priv->stat.tx_ampdu_tx_start_count);
 +    printk("%s openwifi_ampdu_action: start TX aggregation. tid %d\n", sdr_compatible_str, params->tid);
 +    break;
 +  case IEEE80211_AMPDU_TX_STOP_CONT:
@@ -4949,29 +5355,84 @@ index 0000000..28e67e0
 +      return -EINVAL;
 +    }
 +    ieee80211_stop_tx_ba_cb_irqsafe(vif, sta->addr, params->tid);
++    OW_U32_INC(priv->stat.tx_ampdu_tx_stop_count);
 +    printk("%s openwifi_ampdu_action: stop TX aggregation. tid %d\n", sdr_compatible_str, params->tid);
 +    break;
 +  case IEEE80211_AMPDU_TX_STOP_FLUSH:
 +    /* mac80211 API note: STOP_FLUSH does not require stop_tx_ba_cb_irqsafe(). */
++    OW_U32_INC(priv->stat.tx_ampdu_tx_stop_count);
 +    printk("%s openwifi_ampdu_action: flush-stop TX aggregation. tid %d\n", sdr_compatible_str, params->tid);
 +    break;
 +  case IEEE80211_AMPDU_TX_OPERATIONAL:
 +    if (!sta) {
 +      return -EINVAL;
 +    }
-+    buf_size = OW_AMPDU_TX_OPERATIONAL_BUF_SIZE;
++    /* NOTE(openwifi-tx-ampdu-global-reg): TX_INTF_REG_AMPDU_ACTION_CONFIG is
++     * still one shared hardware register, not per peer/TID state. A later
++     * IEEE80211_AMPDU_TX_OPERATIONAL callback can therefore overwrite
++     * buf_size/density/max_tx_bytes for earlier peers or TIDs. Keep this
++     * acceptable limitation explicit until TX aggregation parameters grow a
++     * fuller per-flow hardware contract. */
++    buf_size = clamp_t(u16, params->buf_size, 1U,
++      min_t(u16, OW_AMPDU_BUF_SIZE_MAX, OW_AMPDU_STATUS_SAFE_BUF_SIZE_MAX));
 +    max_tx_bytes = (u16)(BIT(IEEE80211_HT_MAX_AMPDU_FACTOR + sta->ht_cap.ampdu_factor) - 1U);
-+    ampdu_action_config = (sta->ht_cap.ampdu_density << OW_AMPDU_DENSITY_SHIFT) |
-+      (buf_size << OW_AMPDU_BUF_SIZE_SHIFT) |
++    ampdu_action_config = (sta->ht_cap.ampdu_density << OW_AMPDU_ACTION_CONFIG_DENSITY_SHIFT) |
++      (buf_size << OW_AMPDU_ACTION_CONFIG_BUF_SIZE_SHIFT) |
 +      max_tx_bytes;
 +    tx_intf_api->TX_INTF_REG_AMPDU_ACTION_CONFIG_write(ampdu_action_config);
++    OW_U32_INC(priv->stat.tx_ampdu_tx_operational_count);
 +    printk("%s openwifi_ampdu_action: TX operational. tid %d max_tx_bytes %d ampdu_density %d buf_size %d\n",
 +      sdr_compatible_str, params->tid, max_tx_bytes, sta->ht_cap.ampdu_density, buf_size);
 +    break;
 +  case IEEE80211_AMPDU_RX_START:
-+    printk("%s openwifi_ampdu_action: start RX aggregation. tid %d\n", sdr_compatible_str, params->tid);
++    if (!sta) {
++      return -EINVAL;
++    }
++    if (!openwifi_vif_supports_rx_ba(vif)) {
++      return -EOPNOTSUPP;
++    }
++
++    spin_lock_irqsave(&priv->lock, flags);
++    if (priv->rx_ba_active &&
++        (priv->rx_ba_tid != params->tid ||
++         !ether_addr_equal(priv->rx_ba_peer_addr, sta->addr))) {
++      OW_U32_INC(priv->stat.rx_ampdu_reject_count);
++      spin_unlock_irqrestore(&priv->lock, flags);
++      printk(KERN_WARNING "%s openwifi_ampdu_action: reject RX aggregation for %pM tid %d while %pM tid %d is active\n",
++        sdr_compatible_str, sta->addr, params->tid, priv->rx_ba_peer_addr, priv->rx_ba_tid);
++      return -EBUSY;
++    }
++
++    priv->rx_ba_active = true;
++    priv->rx_ba_tid = params->tid;
++    priv->rx_ba_ssn = params->ssn;
++    priv->rx_ba_buf_size = params->buf_size;
++    priv->rx_ba_timeout_tu = params->timeout;
++    ether_addr_copy(priv->rx_ba_peer_addr, sta->addr);
++    openwifi_write_ampdu_rx_peer(sta->addr);
++    openwifi_write_ampdu_rx_action(true, params->tid, true);
++    spin_unlock_irqrestore(&priv->lock, flags);
++
++    OW_U32_INC(priv->stat.rx_ampdu_start_count);
++    printk("%s openwifi_ampdu_action: start RX aggregation for %pM tid %d ssn %u buf_size %u timeout %uTU\n",
++      sdr_compatible_str, sta->addr, params->tid, params->ssn, params->buf_size, params->timeout);
 +    break;
 +  case IEEE80211_AMPDU_RX_STOP:
++    if (!openwifi_vif_supports_rx_ba(vif)) {
++      return -EOPNOTSUPP;
++    }
++    spin_lock_irqsave(&priv->lock, flags);
++    if (priv->rx_ba_active &&
++        priv->rx_ba_tid == params->tid &&
++        (!sta || ether_addr_equal(priv->rx_ba_peer_addr, sta->addr))) {
++      openwifi_reset_rx_ba_session_locked(priv);
++      spin_unlock_irqrestore(&priv->lock, flags);
++    } else {
++      spin_unlock_irqrestore(&priv->lock, flags);
++      printk(KERN_INFO "%s openwifi_ampdu_action: RX stop for tid %d with no matching active session\n",
++        sdr_compatible_str, params->tid);
++    }
++    OW_U32_INC(priv->stat.rx_ampdu_stop_count);
 +    printk("%s openwifi_ampdu_action: stop RX aggregation. tid %d\n", sdr_compatible_str, params->tid);
 +    break;
 +  default:
@@ -4990,6 +5451,7 @@ index 0000000..28e67e0
 +  .stop = openwifi_stop,
 +  .add_interface = openwifi_add_interface,
 +  .remove_interface = openwifi_remove_interface,
++  .sta_remove = openwifi_sta_remove,
 +  .config = openwifi_config,
 +  .set_antenna = openwifi_set_antenna,
 +  .get_antenna = openwifi_get_antenna,
@@ -5007,10 +5469,10 @@ index 0000000..28e67e0
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..e1759a5
+index 0000000..194dad1
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1384 @@
+@@ -0,0 +1,1422 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -5125,11 +5587,49 @@ index 0000000..e1759a5
 + *   CVA6 decoder.sv:452-466, cva6.sv:1513-1536 (CMO stubs).
 + *
 + * NOTE(openwifi-rx-processing-smp): The rx_processing re-entrancy guard uses
-+ *   test_and_set_bit — atomic on both SMP and UP.  On SMP, this prevents two
++ *   test_and_set_bit — atomic on both SMP and UP. On SMP, this prevents two
 + *   CPUs from both entering Phase RX-B, which would race on local_ampdu_ref
-+ *   writeback in Phase RX-C.  Currently AMPDU aggregation is non-functional
-+ *   (test_mode=0 → AGGR_ENABLE=false), but the guard is SMP-safe regardless.
++ *   writeback in Phase RX-C while aggregated MPDUs are being delivered.
 + */
++
++/**
++ * @brief Decide whether RX AMPDU metadata matches the active BA session.
++ *
++ * The XPU exposes only one active RX BA peer/TID at a time. Guarding the
++ * mac80211 AMPDU metadata here keeps the RX data path aligned with that
++ * driver/RTL contract even if stale aggregate bits appear during teardown.
++ *
++ * @param priv Driver private state.
++ * @param hdr 802.11 header pointer for the received MPDU.
++ * @param len MPDU length in bytes.
++ * @return True when the frame matches the active RX BA peer/TID.
++ */
++static bool openwifi_rx_ampdu_details_allowed(
++  struct openwifi_priv *priv,
++  struct ieee80211_hdr *hdr,
++  u32 len)
++{
++  unsigned long flags;
++  unsigned int hdr_len_bytes;
++  bool allowed;
++
++  if (!ieee80211_is_data_qos(hdr->frame_control)) {
++    return false;
++  }
++
++  hdr_len_bytes = ieee80211_hdrlen(hdr->frame_control);
++  if (len < hdr_len_bytes) {
++    return false;
++  }
++
++  spin_lock_irqsave(&priv->lock, flags);
++  allowed = (priv->rx_ba_active &&
++    priv->rx_ba_tid == ieee80211_get_tid(hdr) &&
++    ether_addr_equal(priv->rx_ba_peer_addr, hdr->addr2));
++  spin_unlock_irqrestore(&priv->lock, flags);
++
++  return allowed;
++}
 +
 +//=============================================================================
 +// RX Ring and DMA Register Helpers
@@ -6296,7 +6796,7 @@ index 0000000..e1759a5
 +      if (short_gi) {
 +        rxcb->enc_flags |= RX_ENC_FLAG_SHORT_GI;
 +      }
-+      if (ht_aggr) {
++      if (ht_aggr && openwifi_rx_ampdu_details_allowed(priv, hdr, len)) {
 +        rxcb->ampdu_reference = local_ampdu_ref;
 +        rxcb->flag |= RX_FLAG_AMPDU_DETAILS | RX_FLAG_AMPDU_LAST_KNOWN;
 +        if (ht_aggr_last) {
@@ -6347,8 +6847,8 @@ index 0000000..e1759a5
 +      printk_ratelimited(KERN_WARNING "%s openwifi_rx: WARNING dev_alloc_skb failed!\n", sdr_compatible_str);
 +    }
 +
-+    /* NOTE: ampdu_ref advances even on alloc failure — pre-existing behavior.
-+     * Harmless while AGGR_ENABLE=false (no AMPDU). */
++    /* NOTE: ampdu_ref advances even on alloc failure so the next A-MPDU tail
++     * still gets a fresh monotonic reference for mac80211 reorder tracking. */
 +    if (ht_aggr_last) {
 +      local_ampdu_ref++;
 +    }
@@ -6397,10 +6897,10 @@ index 0000000..e1759a5
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..4273d60
+index 0000000..0ab4af8
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,1936 @@
+@@ -0,0 +1,2143 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -6414,6 +6914,12 @@ index 0000000..4273d60
 + * - no-ack status policy:
 + *   frames marked IEEE80211_TX_CTL_NO_ACK report
 + *   IEEE80211_TX_STAT_NOACK_TRANSMITTED on successful completion.
++ * - TX completion policy:
++ *   aggregate completions now rely on an explicit hardware response class from
++ *   PKT_INFO2. A valid zero-bitmap BlockAck is reported as AMPDU with
++ *   ampdu_ack_len=0, while IEEE80211_TX_STAT_AMPDU_NO_BACK is reserved for
++ *   completions where no valid BlockAck arrived. That includes explicit
++ *   timeout/no-response and the unexpected plain-ACK case for aggregate TX.
 + */
 +
 +//=============================================================================
@@ -6473,17 +6979,6 @@ index 0000000..4273d60
 +#define OW_TX_MPDU_DELIM_LEN_FIELD_OFFSET 0U
 +#define OW_TX_MPDU_DELIM_CRC_FIELD_OFFSET 2U
 +#define OW_TX_MPDU_DELIM_SIG_FIELD_OFFSET 3U
-+#define OW_TX_PKT_INFO1_RETX_MASK  0xFU
-+#define OW_TX_PKT_INFO1_LAST_BD_SHIFT 5U
-+#define OW_TX_PKT_INFO1_QUEUE_SHIFT 15U
-+#define OW_TX_PKT_INFO1_PRIO_SHIFT 17U
-+#define OW_TX_PKT_INFO1_PRIO_MASK  0x3U
-+#define OW_TX_PKT_INFO1_NUM_SLOT_SHIFT 19U
-+#define OW_TX_PKT_INFO1_NUM_SLOT_MASK 0x1FFU
-+#define OW_TX_PKT_INFO1_CW_SHIFT   28U
-+#define OW_TX_PKT_INFO1_CW_MASK    0xFU
-+#define OW_TX_PKT_INFO2_PKT_CNT_MASK 0x3FU
-+#define OW_TX_PKT_INFO2_BA_SSN_SHIFT 6U
 +#define OW_TX_BA_BITMAP_BITS       64U
 +#define OW_TX_DMA_ADDR_ALIGN_MASK  0x7U
 +#define OW_TX_RETRY_LIMIT_MASK     0xFU
@@ -6493,11 +6988,79 @@ index 0000000..4273d60
 +#define OW_TX_RATE_OVERRIDE_HT_SGI_BIT 0x10U
 +#define OW_TX_QOS_CTRL_MIN_LEN_BYTES 26U
 +#define OW_TX_RECLAIM_MAX_ENTRIES    (MAX_NUM_SW_QUEUE * NUM_TX_BD)
-+
 +static inline void ow_tx_restore_skb_for_status(struct sk_buff *skb, u16 len_mpdu, bool use_ht_aggr);
 +static inline void report_pkt_loss_due_to_driver_drop(struct ieee80211_hw *dev, struct sk_buff *skb, u16 len_mpdu);
 +static int ow_tx_reconcile_after_terminate_no_alloc(struct openwifi_priv *priv,
 +                                                     struct ieee80211_hw *dev);
++
++/**
++ * @brief Convert one MPDU sequence number into its BlockAck bitmap offset.
++ *
++ * The FPGA reports a 12-bit BA starting sequence number plus a 64-bit bitmap.
++ * Aggregate completion code must use the same offset rule for both per-subframe
++ * pass/fail and aggregate-level acknowledged-subframe counting.
++ *
++ * @param seq_no MPDU sequence number from the completed BD.
++ * @param blk_ack_ssn BlockAck starting sequence number.
++ * @return Bitmap offset in the BA window.
++ */
++static inline u16 ow_tx_ba_bitmap_idx(u16 seq_no, u16 blk_ack_ssn)
++{
++  return (seq_no - blk_ack_ssn) & OW_TX_BA_SSN_MASK;
++}
++
++/**
++ * @brief Check whether one completed MPDU is acknowledged in the BA bitmap.
++ *
++ * @param seq_no MPDU sequence number from the completed BD.
++ * @param blk_ack_ssn BlockAck starting sequence number.
++ * @param blk_ack_bitmap BlockAck bitmap returned by the FPGA.
++ * @return True when the MPDU is covered and acknowledged by the BA bitmap.
++ */
++static inline bool ow_tx_mpdu_acked_by_ba(u16 seq_no, u16 blk_ack_ssn, u64 blk_ack_bitmap)
++{
++  u16 bitmap_idx;
++
++  bitmap_idx = ow_tx_ba_bitmap_idx(seq_no, blk_ack_ssn);
++  if (bitmap_idx >= OW_TX_BA_BITMAP_BITS) {
++    return false;
++  }
++
++  return (((blk_ack_bitmap >> bitmap_idx) & 0x1ULL) != 0ULL);
++}
++
++/**
++ * @brief Count acknowledged subframes inside one reported aggregate window.
++ *
++ * @param ring Driver ring that owns the completed BDs.
++ * @param last_bd_rd_idx Hardware-reported last completed BD index.
++ * @param pkt_cnt Number of completed BDs in this aggregate window.
++ * @param blk_ack_ssn BlockAck starting sequence number.
++ * @param blk_ack_bitmap BlockAck bitmap returned by the FPGA.
++ * @return Number of acknowledged subframes in the reported completion window.
++ */
++static u8 ow_tx_count_acked_ampdu_subframes(const struct openwifi_ring *ring,
++                                            u8 last_bd_rd_idx, u8 pkt_cnt,
++                                            u16 blk_ack_ssn, u64 blk_ack_bitmap)
++{
++  u8 i;
++  u8 acked_subframes = 0;
++  u8 bd_idx;
++  u16 seq_no;
++
++  for (i = 1; i <= pkt_cnt; i++) {
++    bd_idx = (last_bd_rd_idx + i - pkt_cnt + NUM_TX_BD) % NUM_TX_BD;
++    seq_no = ring->bds[bd_idx].seq_no;
++    if (seq_no == OPENWIFI_TX_SEQ_INVALID) {
++      continue;
++    }
++    if (ow_tx_mpdu_acked_by_ba(seq_no, blk_ack_ssn, blk_ack_bitmap)) {
++      acked_subframes++;
++    }
++  }
++
++  return acked_subframes;
++}
 +
 +/**
 + * @brief Read little-endian 16-bit value from an unaligned byte buffer.
@@ -6521,6 +7084,129 @@ index 0000000..4273d60
 +static inline u32 ow_tx_read_u32(const u8 *base, u32 offset_bytes)
 +{
 +  return get_unaligned_le32(base + offset_bytes);
++}
++
++/**
++ * @brief Build the aggregate-boundary key for one outgoing frame.
++ *
++ * Aggregation continuity follows the actual programmed hardware queue after
++ * any local driver remap, not the original mac80211 priority.
++ *
++ * @param addr1_low32 Destination MAC low 32 bits.
++ * @param addr1_high16 Destination MAC high 16 bits.
++ * @param duration_id 802.11 Duration/ID field.
++ * @param rate_hw_value FPGA rate selector.
++ * @param pkt_need_ack Whether the MPDU expects ACK/BlockAck.
++ * @param hw_queue Actual driver/hardware queue index.
++ * @param qos_tid QoS TID for QoS data, 0 otherwise.
++ * @param retry_limit_raw Raw retry-limit field programmed into HW.
++ * @param use_short_gi Whether short GI is enabled.
++ * @return Aggregate-boundary key value.
++ */
++static inline struct ow_tx_aggr_key ow_tx_build_aggr_key(u32 addr1_low32, u16 addr1_high16,
++                                                         __le16 duration_id, u8 rate_hw_value,
++                                                         u8 pkt_need_ack, u8 hw_queue, u8 qos_tid,
++                                                         u8 retry_limit_raw, u8 use_short_gi)
++{
++  struct ow_tx_aggr_key key;
++
++  key.addr1_low32 = addr1_low32;
++  key.addr1_high16 = addr1_high16;
++  key.duration_id = duration_id;
++  key.rate_hw_value = rate_hw_value;
++  key.pkt_need_ack = pkt_need_ack;
++  key.hw_queue = hw_queue;
++  key.qos_tid = qos_tid;
++  key.retry_limit_raw = retry_limit_raw;
++  key.use_short_gi = use_short_gi;
++
++  return key;
++}
++
++/**
++ * @brief Check whether one outgoing frame matches the cached aggregate key.
++ *
++ * @param priv Driver private state.
++ * @param hw_queue Hardware queue that owns the aggregate stream.
++ * @param p_key Candidate aggregate key.
++ * @return True when the cached key matches exactly.
++ */
++static inline bool ow_tx_aggr_key_matches_prev(const struct openwifi_priv *priv,
++                                               u8 hw_queue,
++                                               const struct ow_tx_aggr_key *p_key)
++{
++  return READ_ONCE(priv->tx_aggr_prev_key[hw_queue].addr1_low32) == p_key->addr1_low32
++    && READ_ONCE(priv->tx_aggr_prev_key[hw_queue].addr1_high16) == p_key->addr1_high16
++    && READ_ONCE(priv->tx_aggr_prev_key[hw_queue].duration_id) == p_key->duration_id
++    && READ_ONCE(priv->tx_aggr_prev_key[hw_queue].rate_hw_value) == p_key->rate_hw_value
++    && READ_ONCE(priv->tx_aggr_prev_key[hw_queue].pkt_need_ack) == p_key->pkt_need_ack
++    && READ_ONCE(priv->tx_aggr_prev_key[hw_queue].hw_queue) == p_key->hw_queue
++    && READ_ONCE(priv->tx_aggr_prev_key[hw_queue].qos_tid) == p_key->qos_tid
++    && READ_ONCE(priv->tx_aggr_prev_key[hw_queue].retry_limit_raw) == p_key->retry_limit_raw
++    && READ_ONCE(priv->tx_aggr_prev_key[hw_queue].use_short_gi) == p_key->use_short_gi;
++}
++
++/**
++ * @brief Cache the current aggregate-boundary key.
++ *
++ * @param priv Driver private state.
++ * @param hw_queue Hardware queue that owns the aggregate stream.
++ * @param p_key Aggregate key to store.
++ */
++static inline void ow_tx_store_aggr_key(struct openwifi_priv *priv,
++                                        u8 hw_queue,
++                                        const struct ow_tx_aggr_key *p_key)
++{
++  WRITE_ONCE(priv->tx_aggr_prev_key[hw_queue].addr1_low32, p_key->addr1_low32);
++  WRITE_ONCE(priv->tx_aggr_prev_key[hw_queue].addr1_high16, p_key->addr1_high16);
++  WRITE_ONCE(priv->tx_aggr_prev_key[hw_queue].duration_id, p_key->duration_id);
++  WRITE_ONCE(priv->tx_aggr_prev_key[hw_queue].rate_hw_value, p_key->rate_hw_value);
++  WRITE_ONCE(priv->tx_aggr_prev_key[hw_queue].pkt_need_ack, p_key->pkt_need_ack);
++  WRITE_ONCE(priv->tx_aggr_prev_key[hw_queue].hw_queue, p_key->hw_queue);
++  WRITE_ONCE(priv->tx_aggr_prev_key[hw_queue].qos_tid, p_key->qos_tid);
++  WRITE_ONCE(priv->tx_aggr_prev_key[hw_queue].retry_limit_raw, p_key->retry_limit_raw);
++  WRITE_ONCE(priv->tx_aggr_prev_key[hw_queue].use_short_gi, p_key->use_short_gi);
++}
++
++/**
++ * @brief Identify the one completion entry that owns aggregate-level status.
++ *
++ * The maintained reclaim order reports one completion window oldest-first.
++ * Aggregate-level AMPDU status is attached only to that oldest BD.
++ *
++ * @param use_ht_aggr Whether the completed packet was aggregated.
++ * @param completion_idx_one_based Current reclaim-loop index (1..pkt_cnt).
++ * @return True when this completion entry owns aggregate-level status.
++ */
++static inline bool ow_tx_is_ampdu_status_owner(bool use_ht_aggr, u8 completion_idx_one_based)
++{
++  return use_ht_aggr && (completion_idx_one_based == 1U);
++}
++
++/**
++ * @brief Fill mac80211 aggregate-level completion fields.
++ *
++ * @param info mac80211 TX status buffer.
++ * @param pkt_cnt Number of reported subframes in the completion window.
++ * @param ampdu_ack_len Number of acknowledged subframes.
++ * @param pkt_need_ack Whether the aggregate expected BlockAck.
++ * @param tx_resp_class Hardware response-class tag.
++ *
++ * This is owner-only aggregate metadata.  Per-subframe ACK / NOACK success is
++ * still reported on every reclaimed skb so mac80211 accounting stays correct.
++ */
++static inline void ow_tx_set_ampdu_status_fields(struct ieee80211_tx_info *info, u8 pkt_cnt,
++                                                 u8 ampdu_ack_len, bool pkt_need_ack,
++                                                 u8 tx_resp_class)
++{
++  info->flags |= IEEE80211_TX_STAT_AMPDU;
++  info->status.ampdu_len = pkt_cnt;
++  info->status.ampdu_ack_len = ampdu_ack_len;
++  if (pkt_need_ack &&
++      (tx_resp_class == OW_TX_RESP_CLASS_NONE ||
++       tx_resp_class == OW_TX_RESP_CLASS_ACK)) {
++    info->flags |= IEEE80211_TX_STAT_AMPDU_NO_BACK;
++  }
 +}
 +
 +/**
@@ -7128,12 +7814,13 @@ index 0000000..4273d60
 +  struct ieee80211_tx_info *info;
 +  struct ieee80211_hdr *hdr;
 +  u32 reg_val1, hw_queue_len, reg_val2, dma_fifo_no_room_flag, num_slot_random, cw, loop_count = 0, addr1_low32, mcs_for_sysfs;
-+  u16 seq_no, pkt_cnt, blk_ack_ssn, start_idx;
++  u16 seq_no, pkt_cnt, blk_ack_ssn;
 +  u16 addr1_high16;
 +  u8 nof_retx = -1, last_bd_rd_idx, i, prio, queue_idx, nof_retx_stat;
++  u8 ampdu_ack_len = 0, tx_resp_class = 0;
 +  u64 blk_ack_bitmap;
 +  bool tx_fail = false, fpga_queue_has_room = false;
-+  bool use_ht_aggr, pkt_need_ack, use_ht_rate;
++  bool use_ht_aggr, pkt_need_ack, use_ht_rate, report_ampdu_status, tx_ack_received, tx_blockack_received;
 +  int idx_hw_queue;
 +  /* Phase TX-B deferred work lists. */
 +  struct ow_tx_done_entry tx_done[OW_TX_DONE_BUDGET];
@@ -7155,6 +7842,12 @@ index 0000000..4273d60
 +      | ((u64)tx_intf_api->TX_INTF_REG_PKT_INFO4_read() << 32));
 +
 +    if (reg_val1 != OW_TX_BA_REG_INVALID) {
++      WRITE_ONCE(priv->tx_pkt_info_last[0], reg_val1);
++      WRITE_ONCE(priv->tx_pkt_info_last[1], reg_val2);
++      WRITE_ONCE(priv->tx_pkt_info_last[2], (u32)blk_ack_bitmap);
++      WRITE_ONCE(priv->tx_pkt_info_last[3], (u32)(blk_ack_bitmap >> 32));
++      WRITE_ONCE(priv->tx_pkt_info_last_valid, true);
++
 +      nof_retx = (reg_val1 & OW_TX_PKT_INFO1_RETX_MASK);
 +      last_bd_rd_idx = ((reg_val1 >> OW_TX_PKT_INFO1_LAST_BD_SHIFT) & (NUM_TX_BD - 1));
 +      prio = ((reg_val1 >> OW_TX_PKT_INFO1_PRIO_SHIFT) & OW_TX_PKT_INFO1_PRIO_MASK);
@@ -7166,6 +7859,7 @@ index 0000000..4273d60
 +      }
 +      pkt_cnt = (reg_val2 & OW_TX_PKT_INFO2_PKT_CNT_MASK);
 +      blk_ack_ssn = ((reg_val2 >> OW_TX_PKT_INFO2_BA_SSN_SHIFT) & OW_TX_BA_SSN_MASK);
++      tx_resp_class = ((reg_val2 >> OW_TX_PKT_INFO2_RESP_CLASS_SHIFT) & OW_TX_PKT_INFO2_RESP_CLASS_MASK);
 +
 +      queue_idx = ((reg_val1 >> OW_TX_PKT_INFO1_QUEUE_SHIFT) & (MAX_NUM_HW_QUEUE - 1));
 +      dma_fifo_no_room_flag = tx_intf_api->TX_INTF_REG_S_AXIS_FIFO_NO_ROOM_read();
@@ -7263,24 +7957,42 @@ index 0000000..4273d60
 +        ieee80211_tx_info_clear_status(info);
 +
 +        /* Aggregation packet. */
++        report_ampdu_status = ow_tx_is_ampdu_status_owner(use_ht_aggr, i);
++        tx_ack_received = (tx_resp_class == OW_TX_RESP_CLASS_ACK);
++        tx_blockack_received = (tx_resp_class == OW_TX_RESP_CLASS_BLOCKACK);
 +        if (use_ht_aggr) {
-+          if (pkt_need_ack) {
-+            start_idx = (seq_no >= blk_ack_ssn) ? (seq_no - blk_ack_ssn) : (seq_no + ((~blk_ack_ssn + 1) & OW_TX_BA_SSN_MASK));
-+            if (start_idx < OW_TX_BA_BITMAP_BITS) {
-+              tx_fail = (((blk_ack_bitmap >> start_idx) & 0x1ULL) == 0ULL);
-+            } else {
-+              tx_fail = true;
-+            }
++          ampdu_ack_len = 0;
++          if (pkt_need_ack && tx_blockack_received) {
++            tx_fail = !ow_tx_mpdu_acked_by_ba(seq_no, blk_ack_ssn, blk_ack_bitmap);
++          } else if (pkt_need_ack) {
++            tx_fail = true;
 +          } else {
 +            tx_fail = false;
 +          }
-+          info->flags |= IEEE80211_TX_STAT_AMPDU;
-+          info->status.ampdu_len = 1;
-+          info->status.ampdu_ack_len = (pkt_need_ack && !tx_fail) ? 1 : 0;
++          if (report_ampdu_status) {
++            if (pkt_need_ack && tx_blockack_received) {
++              ampdu_ack_len = ow_tx_count_acked_ampdu_subframes(ring, last_bd_rd_idx, pkt_cnt,
++                blk_ack_ssn, blk_ack_bitmap);
++            }
++            ow_tx_set_ampdu_status_fields(info, pkt_cnt, ampdu_ack_len, pkt_need_ack, tx_resp_class);
++            if (pkt_need_ack && priv->stat.stat_enable) {
++              if (tx_blockack_received) {
++                if (ampdu_ack_len == 0) {
++                  OW_U32_INC(priv->stat.tx_ampdu_ba_zero_bitmap_count);
++                } else {
++                  OW_U32_INC(priv->stat.tx_ampdu_ba_nonzero_bitmap_count);
++                }
++              } else if (tx_ack_received) {
++                OW_U32_INC(priv->stat.tx_ampdu_unexpected_ack_count);
++              } else {
++                OW_U32_INC(priv->stat.tx_ampdu_no_ba_count);
++              }
++            }
++          }
 +        }
 +        /* Normal packet. */
 +        else {
-+          tx_fail = pkt_need_ack ? ((blk_ack_bitmap & 0x1) == 0) : false;
++          tx_fail = pkt_need_ack ? (!tx_ack_received) : false;
 +          info->flags &= (~IEEE80211_TX_CTL_AMPDU);
 +        }
 +        /* Update TX statistics for packets that require ACK. */
@@ -7345,12 +8057,11 @@ index 0000000..4273d60
 +          n_done++;
 +        } else {
 +          /* Budget exceeded — fall back to inline completion under lock.
-+           * NOTE: with AMPDU disabled (pkt_cnt=1 per completion) and budget=16,
-+           * this path requires 17+ back-to-back completions before CPU services
-+           * the interrupt — effectively unreachable on CVA6 with per-packet
-+           * udelay.  On Zynq SMP, calling ieee80211_tx_status_irqsafe under
-+           * priv->lock is a latent lock-ordering concern if mac80211 ever calls
-+           * back into the driver while processing the status queue.
++           * The budget is sized so one full aggregate completion fits in the
++           * deferred array under the maintained one-aggregate-at-a-time TX
++           * path. On Zynq SMP, calling ieee80211_tx_status_irqsafe under
++           * priv->lock is still a latent lock-ordering concern if mac80211 ever
++           * calls back into the driver while processing the status queue.
 +           * TODO(openwifi-tx-budget-overflow-smp): if this path ever fires on
 +           * SMP, expand tx_done[] to a resizable list or chunk-drain. */
 +          if (ring->bds[ring->bd_rd_idx].dma_mapping_addr != 0
@@ -7594,8 +8305,8 @@ index 0000000..4273d60
 +  u16 rate_signal_value, len_mpdu = 0, len_psdu, num_dma_symbol, len_mpdu_delim_pad = 0, num_byte_pad;
 +  u16 mpdu_delim_header;
 +  u32 num_dma_byte, addr1_low32, addr2_low32 = 0, addr3_low32 = 0, tx_config, cts_reg = 0, phy_hdr_config;
-+  u16 addr1_high16, addr2_high16 = 0, addr3_high16 = 0, sc, seq_no = 0, cts_duration = 0, sifs, ack_duration = 0, traffic_pkt_duration, n_dbps;
-+  u8 cts_rate_hw_value = 0, cts_rate_signal_value = 0, rate_hw_value, pkt_need_ack, retry_limit_raw, use_short_gi, *dma_buf, retry_limit_hw_value, qos_hdr, prio, queue_idx, drv_ring_idx;
++  u16 addr1_high16, addr2_high16 = 0, addr3_high16 = 0, sc, seq_no = 0, cts_duration = 0, sifs;
++  u8 cts_rate_hw_value = 0, cts_rate_signal_value = 0, rate_hw_value, pkt_need_ack, retry_limit_raw, use_short_gi, *dma_buf, retry_limit_hw_value, qos_hdr, qos_tid, prio, queue_idx, drv_ring_idx;
 +  u16 rc_flags; /* u16 not u8: ieee80211_tx_rate.flags is 11 bits */
 +  bool drv_seqno = false, use_rts_cts = false, use_cts_protect = false, ht_aggr_start = false, use_ht_rate = false, use_ht_aggr = false, cts_use_traffic_rate = false;
 +  __le16 frame_control, duration_id;
@@ -7606,6 +8317,7 @@ index 0000000..4273d60
 +  int max_polls;
 +  void *bounce_buf = NULL; /* aligned DMA bounce buffer when source is unaligned */
 +  bool tx_submit_locked = false;
++  struct ow_tx_aggr_key aggr_key;
 +
 +  len_mpdu = skb->len;
 +
@@ -7759,8 +8471,10 @@ index 0000000..4273d60
 +  use_short_gi = ((rc_flags & IEEE80211_TX_RC_SHORT_GI) != 0);
 +  use_ht_aggr = ((info->flags & IEEE80211_TX_CTL_AMPDU) != 0);
 +  qos_hdr = 0U;
++  qos_tid = 0U;
 +  if (ieee80211_is_data_qos(frame_control) && len_mpdu >= OW_TX_QOS_CTRL_MIN_LEN_BYTES) {
 +    qos_hdr = (*(ieee80211_get_qos_ctl(hdr)));
++    qos_tid = (qos_hdr & IEEE80211_QOS_CTL_TID_MASK);
 +  }
 +
 +  /* Get mac80211-selected rate/MCS first. */
@@ -7835,7 +8549,13 @@ index 0000000..4273d60
 +  duration_id = hdr->duration_id;
 +
 +  if (use_rts_cts) {
-+    printk_ratelimited(KERN_WARNING "%s openwifi_tx: WARNING sn %d use_rts_cts is not supported!\n", sdr_compatible_str, ring->bd_wr_idx);
++    /* Current TX_INTF can emit CTS-to-self protection but not a distinct RTS
++     * control frame. Consume mac80211's stronger protection request by
++     * falling back to CTS-to-self instead of silently transmitting without
++     * any protection. */
++    printk_ratelimited(KERN_WARNING "%s openwifi_tx: WARNING sn %d map USE_RTS_CTS to CTS-to-self fallback\n",
++      sdr_compatible_str, ring->bd_wr_idx);
++    use_cts_protect = true;
 +  }
 +
 +  if (use_cts_protect) {
@@ -7877,32 +8597,19 @@ index 0000000..4273d60
 +      : (OW_TX_MPDU_DELIM_ALIGN_BYTES - (len_mpdu + LEN_PHY_CRC) % OW_TX_MPDU_DELIM_ALIGN_BYTES);
 +    len_psdu = LEN_MPDU_DELIM + len_mpdu + LEN_PHY_CRC + len_mpdu_delim_pad;
 +
-+    if (!READ_ONCE(priv->tx_aggr_prev_valid)
-+        || addr1_low32 != READ_ONCE(priv->tx_aggr_prev_addr1_low32)
-+        || addr1_high16 != READ_ONCE(priv->tx_aggr_prev_addr1_high16)
-+        || duration_id != READ_ONCE(priv->tx_aggr_prev_duration_id)
-+        || rate_hw_value != READ_ONCE(priv->tx_aggr_prev_rate_hw_value)
-+        || use_short_gi != READ_ONCE(priv->tx_aggr_prev_use_short_gi)
-+        || prio != READ_ONCE(priv->tx_aggr_prev_prio)
-+        || retry_limit_raw != READ_ONCE(priv->tx_aggr_prev_retry_limit_raw)
-+        || pkt_need_ack != READ_ONCE(priv->tx_aggr_prev_pkt_need_ack)) {
-+      WRITE_ONCE(priv->tx_aggr_prev_addr1_low32, addr1_low32);
-+      WRITE_ONCE(priv->tx_aggr_prev_addr1_high16, addr1_high16);
-+      WRITE_ONCE(priv->tx_aggr_prev_duration_id, duration_id);
-+      WRITE_ONCE(priv->tx_aggr_prev_rate_hw_value, rate_hw_value);
-+      WRITE_ONCE(priv->tx_aggr_prev_use_short_gi, use_short_gi);
-+      WRITE_ONCE(priv->tx_aggr_prev_prio, prio);
-+      WRITE_ONCE(priv->tx_aggr_prev_retry_limit_raw, retry_limit_raw);
-+      WRITE_ONCE(priv->tx_aggr_prev_pkt_need_ack, pkt_need_ack);
-+      WRITE_ONCE(priv->tx_aggr_prev_valid, true);
-+
++    aggr_key = ow_tx_build_aggr_key(addr1_low32, addr1_high16, duration_id, rate_hw_value,
++      pkt_need_ack, drv_ring_idx, qos_tid, retry_limit_raw, use_short_gi);
++    if (!READ_ONCE(priv->tx_aggr_prev_valid[drv_ring_idx]) ||
++        !ow_tx_aggr_key_matches_prev(priv, drv_ring_idx, &aggr_key)) {
++      ow_tx_store_aggr_key(priv, drv_ring_idx, &aggr_key);
++      WRITE_ONCE(priv->tx_aggr_prev_valid[drv_ring_idx], true);
 +      ht_aggr_start = true;
 +    }
 +  } else {
 +    /* PSDU layout: MPDU only. */
 +    len_psdu = len_mpdu;
-+    /* Keep *_prev state across non-aggregated packets to preserve aggregation
-+     * continuity for dominant QoS data traffic on queue 2. */
++    /* Keep per-queue *_prev state across non-aggregated packets so unrelated
++     * traffic on one queue does not break aggregate continuity on another. */
 +  }
 +  num_dma_symbol = (len_psdu >> TX_INTF_NUM_BYTE_PER_DMA_SYMBOL_IN_BITS)
 +    + ((len_psdu & (TX_INTF_NUM_BYTE_PER_DMA_SYMBOL - 1)) != 0);
@@ -8951,13 +9658,24 @@ index 0000000..e3f209e
 +}
 diff --git a/drivers/sdrctl_intf.c b/drivers/sdrctl_intf.c
 new file mode 100644
-index 0000000..f398d51
+index 0000000..e550c47
 --- /dev/null
 +++ b/drivers/sdrctl_intf.c
-@@ -0,0 +1,685 @@
+@@ -0,0 +1,717 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
++
++/*
++ * sdrctl_intf.c contract notes:
++ * - This file is the userspace-facing debug/control shim for SDRCTL testmode
++ *   register access and selected driver-owned controls.
++ * - Allowlists below define which hardware register addresses are intentionally
++ *   exposed through SDRCTL.
++ * - TX_INTF PKT_INFO1..4 are special: the hardware registers are live
++ *   completion FIFOs owned by the TX IRQ path, so SDRCTL returns the last
++ *   IRQ-captured completion tuple snapshot instead of popping the FIFOs.
++ */
 +
 +#define OW_SLICE_COUNT_VALUE_MASK           0xFFFFFU
 +#define OW_FREQ_MHZ_MIN                     2000U
@@ -9053,6 +9771,8 @@ index 0000000..f398d51
 +  XPU_REG_BSSID_FILTER_HIGH_ADDR,
 +  XPU_REG_MAC_ADDR_LOW_ADDR,
 +  XPU_REG_MAC_ADDR_HIGH_ADDR,
++  XPU_REG_AMPDU_RX_PEER_LOW_ADDR,
++  XPU_REG_AMPDU_RX_PEER_HIGH_ADDR,
 +  XPU_REG_TRX_STATUS_ADDR,
 +  XPU_REG_TSF_RUNTIME_VAL_LOW_ADDR,
 +  XPU_REG_TSF_RUNTIME_VAL_HIGH_ADDR,
@@ -9119,6 +9839,7 @@ index 0000000..f398d51
 +  struct openwifi_priv *priv = hw->priv;
 +  struct nlattr *tb[OPENWIFI_ATTR_MAX + 1];
 +  struct sk_buff *skb;
++  unsigned long flags;
 +  int err;
 +  u32 tmp=-1, reg_cat, reg_addr, reg_val, reg_addr_idx, tsft_high, tsft_low;
 +  int tmp_int;
@@ -9562,17 +10283,35 @@ index 0000000..f398d51
 +    } else if (reg_cat==SDRCTL_REG_CAT_TX_INTF) {
 +      if (reg_addr >= TX_INTF_REG_PKT_INFO1_ADDR &&
 +          reg_addr <= TX_INTF_REG_PKT_INFO4_ADDR) {
-+        /* PKT_INFO1-4 are FIFO read ports — must pop all 4 atomically.
-+         * Pop only on INFO1 access; cache the tuple so INFO2-4 reads
-+         * return the same packet without popping a new FIFO entry. */
-+        static u32 pkt_info_cache[4];
++        /* PKT_INFO1-4 are live completion FIFOs consumed by the TX IRQ path.
++         * Expose a latched IRQ-captured tuple here so debug reads do not pop
++         * completions away from the real consumer and so INFO1-4 stays
++         * coherent even if a later TX IRQ lands mid-read. PKT_INFO1 refreshes
++         * the latched tuple; PKT_INFO2-4 keep returning that same view until
++         * the next PKT_INFO1. */
 +        if (reg_addr == TX_INTF_REG_PKT_INFO1_ADDR) {
-+          pkt_info_cache[0] = tx_intf_api->reg_read(TX_INTF_REG_PKT_INFO1_ADDR);
-+          pkt_info_cache[1] = tx_intf_api->reg_read(TX_INTF_REG_PKT_INFO2_ADDR);
-+          pkt_info_cache[2] = tx_intf_api->reg_read(TX_INTF_REG_PKT_INFO3_ADDR);
-+          pkt_info_cache[3] = tx_intf_api->reg_read(TX_INTF_REG_PKT_INFO4_ADDR);
++          spin_lock_irqsave(&priv->lock, flags);
++          if (priv->tx_pkt_info_last_valid) {
++            priv->tx_pkt_info_latched[0] = priv->tx_pkt_info_last[0];
++            priv->tx_pkt_info_latched[1] = priv->tx_pkt_info_last[1];
++            priv->tx_pkt_info_latched[2] = priv->tx_pkt_info_last[2];
++            priv->tx_pkt_info_latched[3] = priv->tx_pkt_info_last[3];
++            priv->tx_pkt_info_latched_valid = true;
++            tmp = priv->tx_pkt_info_latched[0];
++          } else {
++            priv->tx_pkt_info_latched_valid = false;
++            tmp = 0xFFFFFFFFU;
++          }
++          spin_unlock_irqrestore(&priv->lock, flags);
++        } else {
++          spin_lock_irqsave(&priv->lock, flags);
++          if (priv->tx_pkt_info_latched_valid) {
++            tmp = priv->tx_pkt_info_latched[(reg_addr - TX_INTF_REG_PKT_INFO1_ADDR) / 4];
++          } else {
++            tmp = 0;
++          }
++          spin_unlock_irqrestore(&priv->lock, flags);
 +        }
-+        tmp = pkt_info_cache[(reg_addr - TX_INTF_REG_PKT_INFO1_ADDR) / 4];
 +      } else {
 +        tmp = tx_intf_api->reg_read(reg_addr);
 +      }
@@ -10389,10 +11128,10 @@ index 0000000..a5fb54b
 +#define SIDE_CH_REG_M_AXIS_DATA_COUNT_ADDR         (20*4)
 diff --git a/drivers/sysfs_intf.c b/drivers/sysfs_intf.c
 new file mode 100644
-index 0000000..fb5af3d
+index 0000000..b72f0ff
 --- /dev/null
 +++ b/drivers/sysfs_intf.c
-@@ -0,0 +1,1753 @@
+@@ -0,0 +1,1890 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -10411,6 +11150,11 @@ index 0000000..fb5af3d
 +#define OW_TX_WIFI_RATE_HT_BASE_IDX          12U
 +#define OW_SYSFS_FREQ_MHZ_MIN              2000L
 +#define OW_SYSFS_FREQ_MHZ_MAX              6000L
++#define OW_SYSFS_AIFS_FIELD_MASK             0x0FU
++#define OW_SYSFS_AIFS_Q0_SHIFT               0U
++#define OW_SYSFS_AIFS_Q1_SHIFT               4U
++#define OW_SYSFS_AIFS_Q2_SHIFT               8U
++#define OW_SYSFS_AIFS_Q3_SHIFT               12U
 +
 +#ifdef TX_INTF_IQ_WRITE_TXT_FORMAT
 +static int is_valid_iq_number(int c) {
@@ -11879,6 +12623,134 @@ index 0000000..fb5af3d
 +  return len;
 +}
 +
++/**
++ * @brief Show live AIFS programming and cached mac80211 queue requests.
++ *
++ * The FPGA register reports only AIFSN. Requested TXOP is shown here as the
++ * last mac80211 value for observability; the current RTL/driver path does not
++ * program TXOP into hardware.
++ *
++ * @param input_dev Platform device backing the OpenWiFi driver.
++ * @param attr Sysfs attribute descriptor (unused).
++ * @param buf Output buffer.
++ * @return Number of bytes written to @p buf.
++ */
++static ssize_t aifs_cfg_show(struct device *input_dev, struct device_attribute *attr, char *buf)
++{
++  struct platform_device *pdev = to_platform_device(input_dev);
++  struct ieee80211_hw *dev = platform_get_drvdata(pdev);
++  struct openwifi_priv *priv = dev->priv;
++  u32 reg_val;
++  u16 requested_aifs[OW_NUM_HW_QUEUE];
++  u16 requested_txop[OW_NUM_HW_QUEUE];
++  ssize_t ret_size;
++  (void)attr;
++
++  reg_val = xpu_api->XPU_REG_AIFS_CFG_read();
++  requested_aifs[IEEE80211_AC_VO] = READ_ONCE(priv->requested_aifs[IEEE80211_AC_VO]);
++  requested_aifs[IEEE80211_AC_VI] = READ_ONCE(priv->requested_aifs[IEEE80211_AC_VI]);
++  requested_aifs[IEEE80211_AC_BE] = READ_ONCE(priv->requested_aifs[IEEE80211_AC_BE]);
++  requested_aifs[IEEE80211_AC_BK] = READ_ONCE(priv->requested_aifs[IEEE80211_AC_BK]);
++  requested_txop[IEEE80211_AC_VO] = READ_ONCE(priv->requested_txop[IEEE80211_AC_VO]);
++  requested_txop[IEEE80211_AC_VI] = READ_ONCE(priv->requested_txop[IEEE80211_AC_VI]);
++  requested_txop[IEEE80211_AC_BE] = READ_ONCE(priv->requested_txop[IEEE80211_AC_BE]);
++  requested_txop[IEEE80211_AC_BK] = READ_ONCE(priv->requested_txop[IEEE80211_AC_BK]);
++  ret_size = sysfs_emit(buf,
++    "FPGA AIFS_CFG raw: %08x\n"
++    "FPGA AIFSN q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n"
++    "REQ  AIFSN q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n"
++    "REQ  TXOP  q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n",
++    reg_val,
++    (reg_val >> OW_SYSFS_AIFS_Q0_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK,
++    (reg_val >> OW_SYSFS_AIFS_Q1_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK,
++    (reg_val >> OW_SYSFS_AIFS_Q2_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK,
++    (reg_val >> OW_SYSFS_AIFS_Q3_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK,
++    requested_aifs[IEEE80211_AC_VO],
++    requested_aifs[IEEE80211_AC_VI],
++    requested_aifs[IEEE80211_AC_BE],
++    requested_aifs[IEEE80211_AC_BK],
++    requested_txop[IEEE80211_AC_VO],
++    requested_txop[IEEE80211_AC_VI],
++    requested_txop[IEEE80211_AC_BE],
++    requested_txop[IEEE80211_AC_BK]);
++
++  return ret_size;
++}
++
++/**
++ * @brief Show cached RX BlockAck session state and counters.
++ *
++ * @param input_dev Platform device backing the OpenWiFi driver.
++ * @param attr Sysfs attribute descriptor (unused).
++ * @param buf Output buffer.
++ * @return Number of bytes written to @p buf.
++ */
++static ssize_t ampdu_rx_state_show(struct device *input_dev, struct device_attribute *attr, char *buf)
++{
++  struct platform_device *pdev = to_platform_device(input_dev);
++  struct ieee80211_hw *dev = platform_get_drvdata(pdev);
++  struct openwifi_priv *priv = dev->priv;
++  unsigned long flags;
++  u32 reg_val;
++  u32 peer_low;
++  u32 peer_high;
++  bool rx_ba_active;
++  u8 rx_ba_tid;
++  u16 rx_ba_ssn;
++  u16 rx_ba_buf_size;
++  u16 rx_ba_timeout_tu;
++  u8 rx_ba_peer_addr[ETH_ALEN];
++  ssize_t ret_size;
++  (void)attr;
++
++  reg_val = xpu_api->XPU_REG_AMPDU_ACTION_read();
++  peer_low = xpu_api->XPU_REG_AMPDU_RX_PEER_LOW_read();
++  peer_high = xpu_api->XPU_REG_AMPDU_RX_PEER_HIGH_read();
++  spin_lock_irqsave(&priv->lock, flags);
++  rx_ba_active = priv->rx_ba_active;
++  rx_ba_tid = priv->rx_ba_tid;
++  rx_ba_ssn = priv->rx_ba_ssn;
++  rx_ba_buf_size = priv->rx_ba_buf_size;
++  rx_ba_timeout_tu = priv->rx_ba_timeout_tu;
++  ether_addr_copy(rx_ba_peer_addr, priv->rx_ba_peer_addr);
++  spin_unlock_irqrestore(&priv->lock, flags);
++  ret_size = sysfs_emit(buf,
++    "AMPDU_ACTION raw: %08x\n"
++    "RX BA peer raw low/high: %08x %08x\n"
++    "RX BA active: %u\n"
++    "RX BA tid: %u\n"
++    "RX BA ssn: %u\n"
++    "RX BA buf_size: %u\n"
++    "RX BA timeout_tu: %u\n"
++    "RX BA peer: %pM\n"
++    "RX BA starts/stops/rejects: %u %u %u\n"
++    "TX AMPDU starts/stops/operational: %u %u %u\n",
++    reg_val,
++    peer_low,
++    peer_high,
++    rx_ba_active,
++    rx_ba_tid,
++    rx_ba_ssn,
++    rx_ba_buf_size,
++    rx_ba_timeout_tu,
++    rx_ba_peer_addr,
++    READ_ONCE(priv->stat.rx_ampdu_start_count),
++    READ_ONCE(priv->stat.rx_ampdu_stop_count),
++    READ_ONCE(priv->stat.rx_ampdu_reject_count),
++    READ_ONCE(priv->stat.tx_ampdu_tx_start_count),
++    READ_ONCE(priv->stat.tx_ampdu_tx_stop_count),
++    READ_ONCE(priv->stat.tx_ampdu_tx_operational_count));
++
++  ret_size += sysfs_emit_at(buf, ret_size,
++    "TX AMPDU BA nonzero/zero/no_ba/unexpected_ack: %u %u %u %u\n",
++    READ_ONCE(priv->stat.tx_ampdu_ba_nonzero_bitmap_count),
++    READ_ONCE(priv->stat.tx_ampdu_ba_zero_bitmap_count),
++    READ_ONCE(priv->stat.tx_ampdu_no_ba_count),
++    READ_ONCE(priv->stat.tx_ampdu_unexpected_ack_count));
++
++  return ret_size;
++}
++
 +static ssize_t dbg_ch0_show(struct device *input_dev, struct device_attribute *attr, char *buf) 
 +{
 +  struct platform_device *pdev = to_platform_device(input_dev);
@@ -12004,6 +12876,8 @@ index 0000000..fb5af3d
 +
 +static DEVICE_ATTR(csma_cfg0, S_IRUGO | S_IWUSR, csma_cfg0_show, csma_cfg0_store);
 +static DEVICE_ATTR(cw_max_min_cfg, S_IRUGO | S_IWUSR, cw_max_min_cfg_show, cw_max_min_cfg_store);
++static DEVICE_ATTR(aifs_cfg, S_IRUGO, aifs_cfg_show, NULL);
++static DEVICE_ATTR(ampdu_rx_state, S_IRUGO, ampdu_rx_state_show, NULL);
 +
 +static DEVICE_ATTR(dbg_ch0, S_IRUGO | S_IWUSR, dbg_ch0_show, dbg_ch0_store);
 +static DEVICE_ATTR(dbg_ch1, S_IRUGO | S_IWUSR, dbg_ch1_show, dbg_ch1_store);
@@ -12057,6 +12931,8 @@ index 0000000..fb5af3d
 +
 +  &dev_attr_csma_cfg0.attr,
 +  &dev_attr_cw_max_min_cfg.attr,
++  &dev_attr_aifs_cfg.attr,
++  &dev_attr_ampdu_rx_state.attr,
 +
 +  &dev_attr_dbg_ch0.attr,
 +  &dev_attr_dbg_ch1.attr,
@@ -12148,16 +13024,22 @@ index 0000000..fb5af3d
 +};
 diff --git a/drivers/tx_intf/tx_intf.c b/drivers/tx_intf/tx_intf.c
 new file mode 100644
-index 0000000..b6f83c7
+index 0000000..b0049eb
 --- /dev/null
 +++ b/drivers/tx_intf/tx_intf.c
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,499 @@
 +/*
-+ * axi lite register access driver
++ * AXI-Lite register access driver for the TX interface block.
 + * Author: Xianjun Jiao, Michael Mehari, Wei Liu
 + * SPDX-FileCopyrightText: 2019 UGent
 + * SPDX-License-Identifier: AGPL-3.0-or-later
-+*/
++ *
++ * Ownership notes:
++ * - Register addresses and TX_INTF bit layouts are maintained in hw_def.h.
++ * - PKT_INFO1-4 are live completion FIFO read ports in hardware.
++ * - sdrctl_intf.c exposes an IRQ-cached debug snapshot instead of popping them.
++ * - This file is only the AXI-Lite access shim for the TX interface block.
++ */
 +
 +#include <linux/bitops.h>
 +#include <linux/dmapool.h>
@@ -12647,10 +13529,10 @@ index 0000000..b6f83c7
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/xpu/xpu.c b/drivers/xpu/xpu.c
 new file mode 100644
-index 0000000..c9bb6ee
+index 0000000..e4533a9
 --- /dev/null
 +++ b/drivers/xpu/xpu.c
-@@ -0,0 +1,702 @@
+@@ -0,0 +1,781 @@
 +/*
 + * axi lite register access driver
 + * Author: Xianjun Jiao, Michael Mehari, Wei Liu
@@ -12684,13 +13566,21 @@ index 0000000..c9bb6ee
 + *     `AIFS = SIFS + AIFSN * slot_time` before backoff starts. CW and AIFSN
 + *     are implemented; TXOP bursting is still not.
 + * - Aggregation:
-+ *   - `XPU_REG_AMPDU_ACTION` carries per-TID aggregation control consumed by
-+ *     the low-MAC/TX coordination path. The TX path also has separate
-+ *     aggregation programming in the TX_INTF register block.
-+ *   - The Linux driver still does not complete RX BlockAck session management,
-+ *     reorder-session lifecycle, or full advertised AMPDU interoperability, so
-+ *     software must not claim full AMPDU capability purely because this
-+ *     register exists.
++ *   - `XPU_REG_AMPDU_ACTION` carries RX BlockAck session control:
++ *       - bit31 enables the currently active RX BA session,
++ *       - bits4:1 hold the active TID,
++ *       - bit0 is a clear/start pulse that resets BA bitmap history.
++ *   - `XPU_REG_AMPDU_RX_PEER_{LOW,HIGH}` carry the one active RX BA peer MAC
++ *     address in little-endian byte order, matching the existing MAC/BSSID
++ *     split-register convention in this block.
++ *   - The TX path has separate aggregation programming in the TX_INTF register
++ *     block.
++ *   - The current hardware/software contract supports one active RX BA
++ *     peer/TID session at a time. That maintained one-peer model now covers
++ *     STA operation and the current AP path on both Zynq and Cheshire, where
++ *     additional RX BA sessions are rejected in software while mac80211 still
++ *     owns the reorder buffer. TXOP and broader multi-session BA handling are
++ *     intentionally not implemented here.
 + *
 + * Timing units and standard intent:
 + * - The RTL CSMA/NAV engines count microsecond-scale timing against the 1 MHz
@@ -12808,6 +13698,46 @@ index 0000000..c9bb6ee
 +
 +static inline u32 XPU_REG_MAC_ADDR_HIGH_read(void){
 +	return reg_read(XPU_REG_MAC_ADDR_HIGH_ADDR);
++}
++
++/**
++ * @brief Write the low 32 bits of the active RX BA peer MAC address.
++ *
++ * @param value Packed MAC bytes [0..3] in little-endian order.
++ */
++static inline void XPU_REG_AMPDU_RX_PEER_LOW_write(u32 value)
++{
++  reg_write(XPU_REG_AMPDU_RX_PEER_LOW_ADDR, value);
++}
++
++/**
++ * @brief Read the low 32 bits of the active RX BA peer MAC address.
++ *
++ * @return Packed MAC bytes [0..3] in little-endian order.
++ */
++static inline u32 XPU_REG_AMPDU_RX_PEER_LOW_read(void)
++{
++  return reg_read(XPU_REG_AMPDU_RX_PEER_LOW_ADDR);
++}
++
++/**
++ * @brief Write the high 16 bits of the active RX BA peer MAC address.
++ *
++ * @param value Packed MAC bytes [4..5] in little-endian order.
++ */
++static inline void XPU_REG_AMPDU_RX_PEER_HIGH_write(u32 value)
++{
++  reg_write(XPU_REG_AMPDU_RX_PEER_HIGH_ADDR, value);
++}
++
++/**
++ * @brief Read the high 16 bits of the active RX BA peer MAC address.
++ *
++ * @return Packed MAC bytes [4..5] in little-endian order.
++ */
++static inline u32 XPU_REG_AMPDU_RX_PEER_HIGH_read(void)
++{
++  return reg_read(XPU_REG_AMPDU_RX_PEER_HIGH_ADDR);
 +}
 +
 +static inline void XPU_REG_BSSID_FILTER_LOW_write(u32 Data) {
@@ -13001,6 +13931,32 @@ index 0000000..c9bb6ee
 +		XPU_REG_MAC_ADDR_HIGH_write( (*( (u16*)(mac_addr + 4) )) & 0x7FFFFFFF );
 +	}
 +	#endif
++}
++
++/**
++ * @brief Program the one active RX BA peer MAC address.
++ *
++ * The current XPU RX BlockAck contract is single-session. RTL compares BAR
++ * and A-MPDU sender address2 against this programmed peer while the session
++ * in `XPU_REG_AMPDU_ACTION` is enabled.
++ *
++ * @param peer_addr Peer MAC address, or NULL to clear the peer match.
++ */
++static inline void XPU_REG_AMPDU_RX_PEER_ADDR_write(const u8 *peer_addr)
++{
++  u32 peer_low32 = 0;
++  u32 peer_high16 = 0;
++
++  if (peer_addr) {
++    peer_low32 = ((u32)peer_addr[0])
++      | ((u32)peer_addr[1] << 8)
++      | ((u32)peer_addr[2] << 16)
++      | ((u32)peer_addr[3] << 24);
++    peer_high16 = ((u32)peer_addr[4]) | ((u32)peer_addr[5] << 8);
++  }
++
++  XPU_REG_AMPDU_RX_PEER_LOW_write(peer_low32);
++  XPU_REG_AMPDU_RX_PEER_HIGH_write(peer_high16);
 +}
 +
 +#define DEFINE_XPU_UNBOUND_READ_STUB(func_name)                                  \
@@ -13224,6 +14180,10 @@ index 0000000..c9bb6ee
 +	xpu_api->XPU_REG_MAC_ADDR_LOW_read=XPU_REG_MAC_ADDR_LOW_read;
 +	xpu_api->XPU_REG_MAC_ADDR_HIGH_write=XPU_REG_MAC_ADDR_HIGH_write;
 +	xpu_api->XPU_REG_MAC_ADDR_HIGH_read=XPU_REG_MAC_ADDR_HIGH_read;
++	xpu_api->XPU_REG_AMPDU_RX_PEER_LOW_write=XPU_REG_AMPDU_RX_PEER_LOW_write;
++	xpu_api->XPU_REG_AMPDU_RX_PEER_LOW_read=XPU_REG_AMPDU_RX_PEER_LOW_read;
++	xpu_api->XPU_REG_AMPDU_RX_PEER_HIGH_write=XPU_REG_AMPDU_RX_PEER_HIGH_write;
++	xpu_api->XPU_REG_AMPDU_RX_PEER_HIGH_read=XPU_REG_AMPDU_RX_PEER_HIGH_read;
 +
 +	xpu_api->XPU_REG_FILTER_FLAG_write=XPU_REG_FILTER_FLAG_write;
 +	xpu_api->XPU_REG_FILTER_FLAG_read=XPU_REG_FILTER_FLAG_read;
@@ -13296,6 +14256,7 @@ index 0000000..c9bb6ee
 +	xpu_api->XPU_REG_SPI_DISABLE_read=XPU_REG_SPI_DISABLE_read;	
 +
 +	xpu_api->XPU_REG_MAC_ADDR_write=XPU_REG_MAC_ADDR_write;
++	xpu_api->XPU_REG_AMPDU_RX_PEER_ADDR_write=XPU_REG_AMPDU_RX_PEER_ADDR_write;
 +
 +	/* Request and map I/O memory */
 +	io = platform_get_resource(pdev, IORESOURCE_MEM, 0);
