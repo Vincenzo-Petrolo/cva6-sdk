@@ -6,6 +6,7 @@
 # Usage: ./check_calib_inf.sh
 # Runs calibration check in background; kills previous instance if running.
 #
+# Author: Andreas T. Kristensen (ZCU104 port)
 # SPDX-FileCopyrightText: 2026 EPFL-TCL
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #==============================================================================

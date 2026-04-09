@@ -8,7 +8,9 @@
 #   No argument = show current state
 #
 # Author: Xianjun Jiao
+# Author: Andreas T. Kristensen (ZCU104 port)
 # SPDX-FileCopyrightText: 2019 UGent
+# SPDX-FileCopyrightText: 2026 EPFL-TCL
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #==============================================================================
 

@@ -28,7 +28,7 @@ FRAME_SIZE_STEP_BYTES=100
 
 for ((size_bytes = FRAME_SIZE_MIN_BYTES; size_bytes <= FRAME_SIZE_MAX_BYTES; size_bytes += FRAME_SIZE_STEP_BYTES)); do
   for ((mcs = 0; mcs <= MCS_INDEX_MAX; mcs++)); do
-    inject_80211 -m "$HW_MODE" -n "$COUNT" -d "$DELAY_US" -r "$mcs" -s "$size_bytes" "$IF" || true
+    ow_inject_80211 -m "$HW_MODE" -n "$COUNT" -d "$DELAY_US" -r "$mcs" -s "$size_bytes" "$IF" || true
     sleep 1
   done
 done

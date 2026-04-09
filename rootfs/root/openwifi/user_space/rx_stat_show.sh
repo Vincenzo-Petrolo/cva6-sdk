@@ -3,8 +3,12 @@
 #==============================================================================
 # rx_stat_show.sh — RX packet statistics display + PER calculation
 #
-# Usage: ./rx_stat_show.sh [interface]
+# Usage: ./rx_stat_show.sh [clear | num_total]
+#   No argument  = show stats only
+#   Non-numeric  = show stats then clear all counters
+#   Numeric (>0) = show stats then compute PER against that target total
 #
+# Author: Andreas T. Kristensen (ZCU104 port)
 # SPDX-FileCopyrightText: 2026 EPFL-TCL
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #==============================================================================

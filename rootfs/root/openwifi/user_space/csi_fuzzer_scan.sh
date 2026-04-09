@@ -6,7 +6,9 @@
 #   1 = scan tap1, 2 = scan tap2, 3 = tap1 after tap2, 4 = tap2 after tap1
 #
 # Author: Xianjun Jiao
+# Author: Andreas T. Kristensen (ZCU104 port)
 # SPDX-FileCopyrightText: 2021 UGent
+# SPDX-FileCopyrightText: 2026 EPFL-TCL
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #==============================================================================
 

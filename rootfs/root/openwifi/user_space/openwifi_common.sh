@@ -12,9 +12,12 @@
 #   OPENWIFI_IFACE         — WiFi interface name (auto-detected or override)
 #   OPENWIFI_DATA_DIR      — path to ~/openwifi/arbitrary_iq_gen/
 #
+# Supports: Zynq-7020 (32-bit), ZCU104 (aarch64), Theshire/CVA6 (rv64)
+#
 # Requires bash. Callers set their own error handling (set -euo pipefail).
 # This library does NOT set error handling — it runs under the caller's opts.
 #
+# Author: Andreas T. Kristensen
 # SPDX-FileCopyrightText: 2026 EPFL-TCL
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #==============================================================================
@@ -44,13 +47,13 @@ export OPENWIFI_DATA_DIR
 #------------------------------------------------------------------------------
 # openwifi_cd_sdr_sysfs — cd to the sdr sysfs directory
 #
-# Checks five paths (theshire root-level, two theshire soc-child variants,
-# Zynq newer, Zynq older) and exits with an error if none found.
+# Checks five paths (theshire root-level, theshire `soc:sdr`, theshire
+# `/soc/sdr` fallback, Zynq newer, Zynq older) and exits with an error if
+# none found.
 #
 # Theshire DTS has `sdr: sdr` at the device-tree root (not inside
 # `soc: soc { simple-bus }`), so Linux creates `/sys/devices/platform/sdr`.
-# The /soc:sdr and /soc/sdr variants are kept as fallbacks in case the DTS is
-# reorganized.
+# The /soc/sdr variant is kept as fallback in case the DTS is reorganized.
 #
 # Args: none
 # Returns: 0 on success, exits 1 if no sdr sysfs path found
