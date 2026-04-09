@@ -4,14 +4,16 @@ This folder carries the Theshire-side Linux patch stack applied by the `cva6-sdk
 
 For the OpenWiFi and AD9361 patch space, the maintenance goal is to minimize local drift and use the external `openwifi` repo as the canonical source wherever that is practical.
 
+All `util/regen_*` commands referenced below are run from the parent `theshire` repo root, not from the `cva6-sdk` repo root.
+
 ## Contents
 
-- `0009-adi-iio.patch`: ADI IIO drivers (AD9361 RF transceiver + cf_axi_adc HDL core driver). Imported from openwifi's patched `adi-linux-64` tree with vanilla-5.10.7 compatibility fixups. Regenerated via `util/regen_adi_iio_patch.sh`.
-- `0010-openwifi.patch`: OpenWiFi driver import (sdr, tx_intf, rx_intf, xpu, etc.). Regenerated via `util/regen_openwifi_patch.sh`.
-- `0011-dma-axi-dmac.patch`: ADI axi-dmac DMA driver with cyclic S2MM fixes for OpenWiFi RX + Kconfig RISCV + `of_reserved_mem_device_init` for CVA6 PMA NC DMA pool. Merged from former 0012 (Kconfig RISCV). Regenerated via `util/regen_dma_patch.sh`.
+- `0009-adi-iio.patch`: ADI IIO drivers (AD9361 RF transceiver + cf_axi_adc HDL core driver). Imported from openwifi's patched `adi-linux-64` tree with vanilla-5.10.7 compatibility fixups. Regenerated from the parent `theshire` repo via `util/regen_adi_iio_patch.sh`.
+- `0010-openwifi.patch`: OpenWiFi driver import (sdr, tx_intf, rx_intf, xpu, etc.). Regenerated from the parent `theshire` repo via `util/regen_openwifi_patch.sh`.
+- `0011-dma-axi-dmac.patch`: ADI axi-dmac DMA driver with cyclic S2MM fixes for OpenWiFi RX + Kconfig RISCV + `of_reserved_mem_device_init` for CVA6 PMA NC DMA pool. Merged from former 0012 (Kconfig RISCV). Regenerated from the parent `theshire` repo via `util/regen_dma_patch.sh`.
 - `0012-gpio-mmio-opentitan.patch`: GPIO MMIO driver for OpenTitan. (Renumbered from 0013.)
 - `0013-dma-coherent-memremap-wb.patch`: Change `MEMREMAP_WC` to `MEMREMAP_WB` in `dma_init_coherent_memory()` for CVA6 PMA NC region where LLC provides coherency.
-- The 3 openwifi-sourced patches (0009-0011) have regen scripts. `util/regen_all_patches.sh` regenerates all of them. 0012 and 0013 are hand-maintained Theshire-local patches.
+- The 3 openwifi-sourced patches (0009-0011) have regen scripts. Run `util/regen_all_patches.sh` from the parent `theshire` repo root to regenerate all of them. 0012 and 0013 are hand-maintained Theshire-local patches.
 
 ## Canonical external sources
 
@@ -94,7 +96,7 @@ ADI IIO drivers: AD9361 RF transceiver + cf_axi_adc AXI ADC/DAC HDL core driver.
 
 **Source**: openwifi's patched `adi-linux-64` working tree (ADI upstream `2022_R2` branch + openwifi overlay from `patches/adi-linux-64/files/`).
 
-**Regeneration**: `source source_toolchains.sh && bash util/regen_adi_iio_patch.sh`
+**Regeneration** (from the parent `theshire` repo root): `source source_toolchains.sh && bash util/regen_adi_iio_patch.sh`
 
 The script copies files from the openwifi working tree, applies vanilla-5.10.7 compatibility fixups (IIO_CHAN_INFO_CALIBPHASE removal, DMA ring buffer stubbing, .read_label removal, IIO_VAL_INT_64 replacement, ADI_AXI_REG_ID guard), and diffs against the vanilla Kconfig/Makefile.
 
@@ -104,34 +106,21 @@ The script copies files from the openwifi working tree, applies vanilla-5.10.7 c
 
 OpenWiFi driver import (sdr, tx_intf, rx_intf, xpu, openofdm_tx/rx, side_ch).
 
-**Regeneration**: `source source_toolchains.sh && bash util/regen_openwifi_patch.sh`
+**Regeneration** (from the parent `theshire` repo root): `source source_toolchains.sh && bash util/regen_openwifi_patch.sh`
 
 Uses `0010-openwifi.manifest.tsv` as the import manifest. `git_rev.h` and `pre_def.h` are generated deterministically from the openwifi repo state.
 
 ### `0011-dma-axi-dmac.patch`
 
-ADI axi-dmac DMA driver with OpenWiFi cyclic S2MM fixes + Kconfig RISCV +
-`of_reserved_mem_device_init`/`release` for CVA6 PMA NC DMA pool binding.
+ADI axi-dmac DMA driver with OpenWiFi cyclic S2MM fixes + Kconfig RISCV + `of_reserved_mem_device_init`/`release` for CVA6 PMA NC DMA pool binding.
 
-**Merged from former 0012** (Kconfig RISCV glue). The Kconfig one-liner
-(`|| RISCV` on AXI_DMAC depends) is now applied inline by the regen script.
+**Merged from former 0012** (Kconfig RISCV glue). The Kconfig one-liner (`|| RISCV` on AXI_DMAC depends) is now applied inline by the regen script.
 
-**`of_reserved_mem_device_init()`**: Binds the DMA device to a DTS
-`reserved-memory` pool if present (`memory-region` property). On CVA6/Theshire,
-this directs `dma_alloc_coherent()` to allocate from the PMA non-cacheable
-region, eliminating the need for FENCE.T L1 cache invalidation. On ARM/Zynq
-(no `memory-region` in DTS), returns `-ENODEV` — no behavioral change.
+**`of_reserved_mem_device_init()`**: Binds the DMA device to a DTS `reserved-memory` pool if present (`memory-region` property). On CVA6/Theshire, this directs `dma_alloc_coherent()` to allocate from the PMA non-cacheable region, eliminating the need for FENCE.T L1 cache invalidation. On ARM/Zynq (no `memory-region` in DTS), returns `-ENODEV` — no behavioral change.
 
-**`ow_rx_force_flag_last` = REQUIRED (compiled-in default: `true`).**
-`S80openwifi` also writes `Y` to the sysfs parameter as a safety net.
-Without FLAG_LAST, FPGA TLAST triggers abort/consume cascade in ADI DMAC
-data_mover.v → ~63 bogus completions per packet → IRQ storm. On CVA6
-(100 MHz), this manifests as elevated `rx_dma_cb_full_count` (DMA callback
-stall counter) rather than the full system hang seen on ARM. Root cause
-confirmed on openwifi ARM (commit `68475b3`, 2026-03-26); suspected on CVA6
-RISC-V — pending on-board verification.
+**`ow_rx_force_flag_last` = REQUIRED (compiled-in default: `true`).** `S80openwifi` also writes `Y` to the sysfs parameter as a safety net. Without FLAG_LAST, FPGA TLAST triggers abort/consume cascade in ADI DMAC data_mover.v → ~63 bogus completions per packet → IRQ storm. On CVA6 (100 MHz), this manifests as elevated `rx_dma_cb_full_count` (DMA callback stall counter) rather than the full system hang seen on ARM. Root cause confirmed on openwifi ARM (commit `68475b3`, 2026-03-26); suspected on CVA6 RISC-V — pending on-board verification.
 
-**Regeneration**: `source source_toolchains.sh && bash util/regen_dma_patch.sh`
+**Regeneration** (from the parent `theshire` repo root): `source source_toolchains.sh && bash util/regen_dma_patch.sh`
 
 Canonical source: `openwifi/patches/adi-linux-64/files/drivers/dma/dma-axi-dmac.c`
 

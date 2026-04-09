@@ -20,8 +20,7 @@ Requirements Fedora:
 ```console
 $ sudo dnf install autoconf automake @development-tools curl dtc libmpc-devel mpfr-devel gmp-devel libusb-devel gawk gcc-c++ bison flex texinfo gperf libtool patchutils bc zlib-devel expat-devel
 ```
-You can select the XLEN by setting it in the Makefile.
-Then compile the Linux images with
+You can select the XLEN by setting it in the Makefile. Then compile the Linux images with
 
 ```console
 $ git submodule update --init --recursive
@@ -40,7 +39,7 @@ $ make all
 You can also build a compatible Linux image that boots Linux on the CVA6 fpga mapping:
 ```bash
 $ make vmlinux # make only the elf Linux image
-$ make uImage.bin # generate the Linux image with the u-boot wrapper
+$ make uImage # generate the Linux image with the u-boot wrapper
 $ make fw_payload.bin # generate the OpenSBI + U-Boot payload
 ```
 
@@ -51,8 +50,7 @@ $ make images # generates all images and save them in install$(XLEN)
 ```
 
 ## Spike
-You can test your image on spike 
-First, build spike with:
+You can test your image on spike. First, build spike with:
 
 ```bash
 $ make isa-sim
@@ -103,11 +101,7 @@ $ sudo -E make flash-sdcard SDDEVICE=/dev/sdb
 If you really need and want to debug on an FPGA/ASIC target the installation instructions are [here](https://github.com/riscv/riscv-openocd).
 
 ## Ethernet SSH
-This patch incorporates an overlay to overcome the painful delay in generating public/private key pairs on the target
-(which happens every time because the root filing system is volatile). Do not use these keys on more than one device.
-Likewise it also incorporates a script (rootfs/etc/init.d/S40fixup) which replaces the MAC address with a valid Digilent
-value. This should be replaced by the unique value on the back of the Genesys2 board if more than one device is used on
-the same VLAN. Needless to say both of these values would need regenerating for anything other than development use.
+This patch incorporates an overlay to overcome the painful delay in generating public/private key pairs on the target (which happens every time because the root filing system is volatile). Do not use these keys on more than one device. Likewise it also incorporates a script (rootfs/etc/init.d/S40fixup) which replaces the MAC address with a valid Digilent value. This should be replaced by the unique value on the back of the Genesys2 board if more than one device is used on the same VLAN. Needless to say both of these values would need regenerating for anything other than development use.
 
 # Docker Container
 

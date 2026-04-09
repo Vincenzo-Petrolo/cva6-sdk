@@ -1,5 +1,5 @@
 # 0009-adi-iio.patch provenance — generated 2026-04-07T09:07:35+02:00
-# Re-run: source source_toolchains.sh && bash util/regen_adi_iio_patch.sh
+# Re-run from parent theshire repo root: source source_toolchains.sh && bash util/regen_adi_iio_patch.sh
 adi_linux_commit=c2f371e014f0
 openwifi_commit=5754619
 theshire_commit=94251c1a7

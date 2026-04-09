@@ -62,7 +62,7 @@ BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
 BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
 BR2_PACKAGE_WPA_SUPPLICANT_PASSPHRASE=y
 
-# OpenWiFi userspace tools (require OPENWIFI_SRC set in source_toolchains.sh)
+# OpenWiFi userspace tools (build from committed bundled package sources)
 BR2_PACKAGE_OPENWIFI_SDRCTL=y
 BR2_PACKAGE_OPENWIFI_SIDE_CH_CTL=y
 BR2_PACKAGE_OPENWIFI_INJECT_80211=y
