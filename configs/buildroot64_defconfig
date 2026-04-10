@@ -89,6 +89,8 @@ BR2_PACKAGE_LRZSZ=y
 # Hardware debugging — core
 #------------------------------------------------------------------------------
 BR2_PACKAGE_STRACE=y
+BR2_PACKAGE_LINUX_TOOLS_PERF=y
+BR2_PACKAGE_TRACE_CMD=y
 
 #==============================================================================
 # Optional packages — comment out to save image size

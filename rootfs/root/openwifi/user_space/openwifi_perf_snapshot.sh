@@ -14,7 +14,7 @@
 # - minstrel rc_stats when available
 #
 # Usage:
-#   ./openwifi_perf_snapshot.sh [iface]
+#   bash ./openwifi_perf_snapshot.sh [iface]
 #
 # Args:
 #   iface  Optional interface name. Defaults to OPENWIFI_IFACE from
@@ -25,16 +25,29 @@
 #==============================================================================
 
 set -euo pipefail
+# shellcheck disable=SC1091
+# shellcheck source=./openwifi_common.sh
 . "$(dirname "$0")/openwifi_common.sh"
 
 iface="${1:-$OPENWIFI_IFACE}"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+original_kernel_printk="$(cat /proc/sys/kernel/printk 2>/dev/null || true)"
 
 section() {
   printf '\n=== %s ===\n' "$1"
 }
 
-# Keep console logging verbose enough that OpenWiFi warnings stay visible on the
-# serial console during measurement runs.
+restore_kernel_printk() {
+  if [[ -n "$original_kernel_printk" ]]; then
+    printf '%s\n' "$original_kernel_printk" > /proc/sys/kernel/printk 2>/dev/null || true
+  fi
+}
+
+trap restore_kernel_printk EXIT
+
+# Temporarily raise console logging during the snapshot so warning-level dmesg
+# output remains visible while collecting evidence. Restore the prior setting on
+# exit so the helper does not leave verbose printk enabled for follow-on traffic.
 echo 7 > /proc/sys/kernel/printk
 
 section "snapshot"
@@ -42,6 +55,12 @@ date
 echo "iface: $iface"
 
 section "kernel printk"
+if [[ -n "$original_kernel_printk" ]]; then
+  echo "before snapshot: $original_kernel_printk"
+else
+  echo "before snapshot: unavailable"
+fi
+echo -n "during snapshot: "
 cat /proc/sys/kernel/printk 2>/dev/null || echo "/proc/sys/kernel/printk unavailable"
 
 section "iw link"
@@ -58,13 +77,13 @@ dmesg | grep -E 'Rx A-MPDU request|did not acknowledge authentication response|R
   echo "no matching markers"
 
 section "tx stats"
-"$(dirname "$0")/tx_stat_show.sh" || echo "tx_stat_show failed"
+"${script_dir}/tx_stat_show.sh" || echo "tx_stat_show failed"
 
 section "rx stats"
-"$(dirname "$0")/rx_stat_show.sh" || echo "rx_stat_show failed"
+"${script_dir}/rx_stat_show.sh" || echo "rx_stat_show failed"
 
 section "tx prio queue"
-"$(dirname "$0")/tx_prio_queue_show.sh" || echo "tx_prio_queue_show failed"
+"${script_dir}/tx_prio_queue_show.sh" || echo "tx_prio_queue_show failed"
 
 section "runtime knobs"
 if command -v sdrctl >/dev/null 2>&1; then
@@ -80,10 +99,22 @@ else
   echo "sdrctl unavailable"
 fi
 
+section "statistics collection"
+openwifi_cd_sdr_sysfs
+if [[ -f stat_enable ]]; then
+  stat_enable_value="$(cat stat_enable 2>/dev/null || echo "unavailable")"
+  echo "stat_enable: ${stat_enable_value}"
+  if [[ "$stat_enable_value" != "1" ]]; then
+    echo "warning: TX/RX packet counters below may be stale or incomplete because stat_enable != 1"
+  fi
+else
+  echo "stat_enable: missing"
+fi
+
 section "rssi / gain readback"
-"$(dirname "$0")/rssi_openwifi_show.sh" 2>/dev/null || echo "rssi_openwifi_show failed"
-"$(dirname "$0")/rssi_ad9361_show.sh" 1 2>/dev/null || echo "rssi_ad9361_show failed"
-"$(dirname "$0")/rx_gain_show.sh" 2>/dev/null || echo "rx_gain_show failed"
+"${script_dir}/rssi_openwifi_show.sh" 2>/dev/null || echo "rssi_openwifi_show failed"
+"${script_dir}/rssi_ad9361_show.sh" 1 2>/dev/null || echo "rssi_ad9361_show failed"
+"${script_dir}/rx_gain_show.sh" 2>/dev/null || echo "rx_gain_show failed"
 
 section "direct sysfs counters"
 openwifi_cd_sdr_sysfs
@@ -126,6 +157,9 @@ cat /proc/net/softnet_stat 2>/dev/null || echo "/proc/net/softnet_stat unavailab
 
 section "loadavg"
 cat /proc/loadavg 2>/dev/null || echo "/proc/loadavg unavailable"
+
+section "schedstat"
+cat /proc/schedstat 2>/dev/null || echo "/proc/schedstat unavailable"
 
 section "vmstat"
 if command -v vmstat >/dev/null 2>&1; then

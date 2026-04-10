@@ -47,13 +47,14 @@ export OPENWIFI_DATA_DIR
 #------------------------------------------------------------------------------
 # openwifi_cd_sdr_sysfs — cd to the sdr sysfs directory
 #
-# Checks five paths (theshire root-level, theshire `soc:sdr`, theshire
-# `/soc/sdr` fallback, Zynq newer, Zynq older) and exits with an error if
-# none found.
+# Checks five paths (theshire platform-root, theshire `soc:sdr`,
+# theshire `/soc/sdr` fallback, Zynq newer, Zynq older) and exits with an
+# error if none found.
 #
-# Theshire DTS has `sdr: sdr` at the device-tree root (not inside
-# `soc: soc { simple-bus }`), so Linux creates `/sys/devices/platform/sdr`.
-# The /soc/sdr variant is kept as fallback in case the DTS is reorganized.
+# On current theshire images the live sysfs path is `/sys/devices/platform/sdr`.
+# Keep the `soc:sdr` and `/soc/sdr` variants as compatibility fallbacks because
+# different platform-bus naming arrangements have appeared across DTS/kernel
+# combinations.
 #
 # Args: none
 # Returns: 0 on success, exits 1 if no sdr sysfs path found

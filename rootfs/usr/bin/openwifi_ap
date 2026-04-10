@@ -13,9 +13,9 @@
 # testing. See docs/todo/todo_openwifi_tx_auth_failure.md.
 #
 # Supported commands:
-#   start  [iface]    — start AP mode
-#   stop   [iface]    — stop AP mode
-#   status [iface]    — show AP status
+#   start   — start AP mode on wlan0
+#   stop    — stop AP mode on wlan0
+#   status  — show AP status on wlan0
 #******************************************************************************
 
 set -eu
@@ -28,6 +28,7 @@ readonly RUNTIME_DIR="/run/openwifi"
 readonly HOSTAPD_CONF="/etc/openwifi/hostapd-openwifi.conf"
 readonly UDHCPD_CONF="/etc/openwifi/udhcpd-openwifi.conf"
 readonly AP_SUBNET="192.168.44.1/24"
+readonly AP_IFACE="wlan0"
 
 #==============================================================================
 # Helpers
@@ -35,9 +36,9 @@ readonly AP_SUBNET="192.168.44.1/24"
 
 usage() {
   echo "Usage:"
-  echo "  openwifi_ap start [iface]"
-  echo "  openwifi_ap stop [iface]"
-  echo "  openwifi_ap status [iface]"
+  echo "  openwifi_ap start"
+  echo "  openwifi_ap stop"
+  echo "  openwifi_ap status"
 }
 
 need_cmd() {
@@ -49,7 +50,7 @@ need_cmd() {
 
 warn_tx_ack() {
   echo ""
-  echo "WARNING: TX ACK timing issue is NOT yet fixed."
+  echo "WARNING: AP mode is still degraded for DHCP/data traffic."
   echo "  Beacons broadcast — AP is VISIBLE to nearby devices."
   echo "  Client association may succeed, but DHCP/data traffic remains unreliable."
   echo "  This AP path is still useful for controlled Wi-Fi-side testing."
@@ -62,7 +63,7 @@ warn_tx_ack() {
 #==============================================================================
 
 do_start() {
-  local iface="${1:-wlan0}"
+  iface="$AP_IFACE"
 
   need_cmd hostapd
   need_cmd udhcpd
@@ -108,7 +109,7 @@ do_start() {
 }
 
 do_stop() {
-  local iface="${1:-wlan0}"
+  iface="$AP_IFACE"
 
   # Stop hostapd
   if [ -f "$RUNTIME_DIR/hostapd-${iface}.pid" ]; then
@@ -132,7 +133,7 @@ do_stop() {
 }
 
 do_status() {
-  local iface="${1:-wlan0}"
+  iface="$AP_IFACE"
 
   echo "=== Interface ==="
   ip addr show "$iface" 2>/dev/null || echo "$iface not found"
@@ -171,10 +172,16 @@ fi
 cmd="$1"
 shift
 
+if [ $# -gt 0 ]; then
+  echo "This helper is wlan0-only; extra arguments are not supported." >&2
+  usage
+  exit 1
+fi
+
 case "$cmd" in
-  start)  do_start "$@" ;;
-  stop)   do_stop "$@" ;;
-  status) do_status "$@" ;;
+  start)  do_start ;;
+  stop)   do_stop ;;
+  status) do_status ;;
   *)
     echo "Unknown command: $cmd" >&2
     usage

@@ -15,10 +15,10 @@
 # This is intentionally small and explicit. It is NOT an auto-tuning framework.
 #
 # Usage:
-#   ./openwifi_perf_sweep.sh <peer_ip> [iface]
+#   bash ./openwifi_perf_sweep.sh <peer_ip> [iface]
 #
 # Example:
-#   ./openwifi_perf_sweep.sh 192.168.50.1 wlan0
+#   bash ./openwifi_perf_sweep.sh 192.168.50.1 wlan0
 #
 # Requirements:
 #   - interface already associated and reachable
@@ -29,6 +29,8 @@
 #==============================================================================
 
 set -euo pipefail
+# shellcheck disable=SC1091
+# shellcheck source=./openwifi_common.sh
 . "$(dirname "$0")/openwifi_common.sh"
 
 peer_ip="${1:-}"
@@ -102,11 +104,11 @@ run_case() {
   ./rx_stat_show.sh clear
   ./tx_prio_queue_show.sh clear
 
-  ./openwifi_perf_snapshot.sh "$iface" > "${case_dir}/before.txt" 2>&1 || true
+  bash ./openwifi_perf_snapshot.sh "$iface" > "${case_dir}/before.txt" 2>&1 || true
   iperf3 -c "$peer_ip" -t 15 -R > "${case_dir}/iperf_download.txt" 2>&1 || true
   iperf3 -c "$peer_ip" -t 15 > "${case_dir}/iperf_upload.txt" 2>&1 || true
   ping -c 10 "$peer_ip" > "${case_dir}/ping.txt" 2>&1 || true
-  ./openwifi_perf_snapshot.sh "$iface" > "${case_dir}/after.txt" 2>&1 || true
+  bash ./openwifi_perf_snapshot.sh "$iface" > "${case_dir}/after.txt" 2>&1 || true
 }
 
 # Conservative first sweep:
