@@ -73,7 +73,7 @@ section "ip addr"
 ip addr show dev "$iface" 2>/dev/null || echo "ip addr unavailable"
 
 section "selected dmesg markers"
-dmesg | grep -E 'Rx A-MPDU request|did not acknowledge authentication response|Removed STA|Destroyed STA|disassoc|deauth|openwifi_tx:|rx_dma_watchdog:|invalid header' || \
+dmesg | grep -E 'Rx A-MPDU request|did not acknowledge authentication response|Removed STA|Destroyed STA|disassoc|deauth|openwifi_tx:|openwifi_ampdu_action:|rx_dma_watchdog:|invalid header' || \
   echo "no matching markers"
 
 section "tx stats"
@@ -109,6 +109,14 @@ if [[ -f stat_enable ]]; then
   fi
 else
   echo "stat_enable: missing"
+fi
+
+section "ampdu rx state"
+openwifi_cd_sdr_sysfs
+if [[ -f ampdu_rx_state ]]; then
+  cat ampdu_rx_state
+else
+  echo "ampdu_rx_state: missing"
 fi
 
 section "rssi / gain readback"

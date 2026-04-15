@@ -47,23 +47,23 @@ export OPENWIFI_DATA_DIR
 #------------------------------------------------------------------------------
 # openwifi_cd_sdr_sysfs — cd to the sdr sysfs directory
 #
-# Checks five paths (theshire platform-root, theshire `soc:sdr`,
+# Checks five paths (theshire `soc:sdr`, theshire platform-root fallback,
 # theshire `/soc/sdr` fallback, Zynq newer, Zynq older) and exits with an
 # error if none found.
 #
-# On current theshire images the live sysfs path is `/sys/devices/platform/sdr`.
-# Keep the `soc:sdr` and `/soc/sdr` variants as compatibility fallbacks because
-# different platform-bus naming arrangements have appeared across DTS/kernel
-# combinations.
+# Use `/sys/devices/platform/soc/soc:sdr` as the explicit theshire path in
+# operator-facing docs. Keep the root-level and `/soc/sdr` variants here only
+# as compatibility fallbacks because different platform-bus naming
+# arrangements have appeared across DTS/kernel combinations.
 #
 # Args: none
 # Returns: 0 on success, exits 1 if no sdr sysfs path found
 #------------------------------------------------------------------------------
 openwifi_cd_sdr_sysfs() {
-  if [[ -d "/sys/devices/platform/sdr" ]]; then
-    cd /sys/devices/platform/sdr || exit 1
-  elif [[ -d "/sys/devices/platform/soc/soc:sdr" ]]; then
+  if [[ -d "/sys/devices/platform/soc/soc:sdr" ]]; then
     cd /sys/devices/platform/soc/soc:sdr || exit 1
+  elif [[ -d "/sys/devices/platform/sdr" ]]; then
+    cd /sys/devices/platform/sdr || exit 1
   elif [[ -d "/sys/devices/platform/soc/sdr" ]]; then
     cd /sys/devices/platform/soc/sdr || exit 1
   elif [[ -d "/sys/devices/platform/fpga-axi@0/fpga-axi@0:sdr" ]]; then

@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..c90a099
+index 0000000..f2894a0
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x49cb91d
++#define GIT_REV 0x0abaaa4
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..12fe2eb
@@ -3416,10 +3416,10 @@ index 0000000..57335aa
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..17628c2
+index 0000000..8da6bd3
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,1054 @@
+@@ -0,0 +1,1057 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -4259,6 +4259,8 @@ index 0000000..17628c2
 +  u32 tx_ampdu_ba_nonzero_bitmap_count;
 +  u32 tx_ampdu_ba_zero_bitmap_count;
 +  u32 tx_ampdu_no_ba_count;
++  /* Legacy debug-only counter. Under the maintained RTL contract aggregate
++   * completions should report BLOCKACK or NONE, so this should stay zero. */
 +  u32 tx_ampdu_unexpected_ack_count;
 +  u32 rx_ampdu_start_count;
 +  u32 rx_ampdu_stop_count;
@@ -4371,8 +4373,9 @@ index 0000000..17628c2
 +  u16  rx_ba_buf_size;
 +  u16  rx_ba_timeout_tu;
 +  u8   rx_ba_peer_addr[ETH_ALEN];
-+  /* Last mac80211-requested EDCA values for observability.
-+   * Queue order: q0=VO, q1=VI, q2=BE, q3=BK. */
++  /* Cached EDCA values for observability.
++   * These arrays may contain driver-seeded startup defaults before the first
++   * mac80211 conf_tx() update. Queue order: q0=VO, q1=VI, q2=BE, q3=BK. */
 +  u16  requested_aifs[MAX_NUM_HW_QUEUE];
 +  u16  requested_txop[MAX_NUM_HW_QUEUE];
 +  u8  rx_target_buf_idx_old;
@@ -4476,10 +4479,10 @@ index 0000000..17628c2
 +#endif /* OPENWIFI_SDR */
 diff --git a/drivers/sdr_mac_ops.c b/drivers/sdr_mac_ops.c
 new file mode 100644
-index 0000000..0ed3413
+index 0000000..9cfaaf1
 --- /dev/null
 +++ b/drivers/sdr_mac_ops.c
-@@ -0,0 +1,987 @@
+@@ -0,0 +1,991 @@
 +/**
 + * @file sdr_mac_ops.c
 + * @brief mac80211 operation callbacks for the OpenWiFi SDR driver.
@@ -5322,6 +5325,7 @@ index 0000000..0ed3413
 + * - fuller AP multi-peer RX BA remains future work
 + * - hardware enforces both the negotiated sender address and TID
 + * - TX operational buf_size is clamped to the maintained deferred-status budget
++ *   (`OW_TX_DONE_BUDGET`, currently 56) and the hardware field width
 + * - mac80211 software reorder remains enabled
 + */
 +static int openwifi_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_ampdu_params *params)
@@ -5372,7 +5376,10 @@ index 0000000..0ed3413
 +     * IEEE80211_AMPDU_TX_OPERATIONAL callback can therefore overwrite
 +     * buf_size/density/max_tx_bytes for earlier peers or TIDs. Keep this
 +     * acceptable limitation explicit until TX aggregation parameters grow a
-+     * fuller per-flow hardware contract. */
++     * fuller per-flow hardware contract. Software also clamps buf_size to the
++     * maintained deferred-status budget (`OW_TX_DONE_BUDGET`, currently 56)
++     * so one aggregate completion IRQ never needs to surface more owner-state
++     * than the current driver bookkeeping can represent safely. */
 +    buf_size = clamp_t(u16, params->buf_size, 1U,
 +      min_t(u16, OW_AMPDU_BUF_SIZE_MAX, OW_AMPDU_STATUS_SAFE_BUF_SIZE_MAX));
 +    max_tx_bytes = (u16)(BIT(IEEE80211_HT_MAX_AMPDU_FACTOR + sta->ht_cap.ampdu_factor) - 1U);
@@ -6897,10 +6904,10 @@ index 0000000..194dad1
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..0ab4af8
+index 0000000..8afb860
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,2143 @@
+@@ -0,0 +1,2150 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -6918,8 +6925,9 @@ index 0000000..0ab4af8
 + *   aggregate completions now rely on an explicit hardware response class from
 + *   PKT_INFO2. A valid zero-bitmap BlockAck is reported as AMPDU with
 + *   ampdu_ack_len=0, while IEEE80211_TX_STAT_AMPDU_NO_BACK is reserved for
-+ *   completions where no valid BlockAck arrived. That includes explicit
-+ *   timeout/no-response and the unexpected plain-ACK case for aggregate TX.
++ *   completions where no valid BlockAck arrived. Under the current maintained
++ *   RTL contract, aggregate TX therefore closes out as either BLOCKACK or
++ *   NONE; a distinct aggregate plain-ACK completion class is not expected.
 + */
 +
 +//=============================================================================
@@ -7202,9 +7210,12 @@ index 0000000..0ab4af8
 +  info->flags |= IEEE80211_TX_STAT_AMPDU;
 +  info->status.ampdu_len = pkt_cnt;
 +  info->status.ampdu_ack_len = ampdu_ack_len;
-+  if (pkt_need_ack &&
-+      (tx_resp_class == OW_TX_RESP_CLASS_NONE ||
-+       tx_resp_class == OW_TX_RESP_CLASS_ACK)) {
++  if (pkt_need_ack && tx_resp_class == OW_TX_RESP_CLASS_NONE) {
++    info->flags |= IEEE80211_TX_STAT_AMPDU_NO_BACK;
++  } else if (pkt_need_ack && tx_resp_class == OW_TX_RESP_CLASS_ACK) {
++    /* Keep this legacy fallback honest: current maintained RTL should not
++     * emit aggregate ACK, but if it ever does, software still treats it as
++     * "no valid BlockAck arrived". */
 +    info->flags |= IEEE80211_TX_STAT_AMPDU_NO_BACK;
 +  }
 +}
@@ -7983,6 +7994,9 @@ index 0000000..0ab4af8
 +                  OW_U32_INC(priv->stat.tx_ampdu_ba_nonzero_bitmap_count);
 +                }
 +              } else if (tx_ack_received) {
++                /* Legacy debug-only counter: current maintained RTL should
++                 * keep this at zero because aggregate completion is expected
++                 * to surface as BLOCKACK or NONE, not ACK. */
 +                OW_U32_INC(priv->stat.tx_ampdu_unexpected_ack_count);
 +              } else {
 +                OW_U32_INC(priv->stat.tx_ampdu_no_ba_count);
@@ -11128,10 +11142,10 @@ index 0000000..a5fb54b
 +#define SIDE_CH_REG_M_AXIS_DATA_COUNT_ADDR         (20*4)
 diff --git a/drivers/sysfs_intf.c b/drivers/sysfs_intf.c
 new file mode 100644
-index 0000000..b72f0ff
+index 0000000..e4c0693
 --- /dev/null
 +++ b/drivers/sysfs_intf.c
-@@ -0,0 +1,1890 @@
+@@ -0,0 +1,1906 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -12624,11 +12638,12 @@ index 0000000..b72f0ff
 +}
 +
 +/**
-+ * @brief Show live AIFS programming and cached mac80211 queue requests.
++ * @brief Show live AIFS programming plus cached driver-visible EDCA state.
 + *
-+ * The FPGA register reports only AIFSN. Requested TXOP is shown here as the
-+ * last mac80211 value for observability; the current RTL/driver path does not
-+ * program TXOP into hardware.
++ * The FPGA register stores the raw AIFSN nibble encoding. A raw nibble value
++ * of 0 means effective AIFSN 2 for legacy compatibility, so expose both raw
++ * and effective views here. TXOP is cached for observability only; the current
++ * RTL/driver path does not program TXOP into hardware.
 + *
 + * @param input_dev Platform device backing the OpenWiFi driver.
 + * @param attr Sysfs attribute descriptor (unused).
@@ -12641,12 +12656,22 @@ index 0000000..b72f0ff
 +  struct ieee80211_hw *dev = platform_get_drvdata(pdev);
 +  struct openwifi_priv *priv = dev->priv;
 +  u32 reg_val;
++  u8 raw_aifs[OW_NUM_HW_QUEUE];
++  u8 effective_aifs[OW_NUM_HW_QUEUE];
 +  u16 requested_aifs[OW_NUM_HW_QUEUE];
 +  u16 requested_txop[OW_NUM_HW_QUEUE];
 +  ssize_t ret_size;
 +  (void)attr;
 +
 +  reg_val = xpu_api->XPU_REG_AIFS_CFG_read();
++  raw_aifs[IEEE80211_AC_VO] = (reg_val >> OW_SYSFS_AIFS_Q0_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK;
++  raw_aifs[IEEE80211_AC_VI] = (reg_val >> OW_SYSFS_AIFS_Q1_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK;
++  raw_aifs[IEEE80211_AC_BE] = (reg_val >> OW_SYSFS_AIFS_Q2_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK;
++  raw_aifs[IEEE80211_AC_BK] = (reg_val >> OW_SYSFS_AIFS_Q3_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK;
++  effective_aifs[IEEE80211_AC_VO] = raw_aifs[IEEE80211_AC_VO] ? raw_aifs[IEEE80211_AC_VO] : 2U;
++  effective_aifs[IEEE80211_AC_VI] = raw_aifs[IEEE80211_AC_VI] ? raw_aifs[IEEE80211_AC_VI] : 2U;
++  effective_aifs[IEEE80211_AC_BE] = raw_aifs[IEEE80211_AC_BE] ? raw_aifs[IEEE80211_AC_BE] : 2U;
++  effective_aifs[IEEE80211_AC_BK] = raw_aifs[IEEE80211_AC_BK] ? raw_aifs[IEEE80211_AC_BK] : 2U;
 +  requested_aifs[IEEE80211_AC_VO] = READ_ONCE(priv->requested_aifs[IEEE80211_AC_VO]);
 +  requested_aifs[IEEE80211_AC_VI] = READ_ONCE(priv->requested_aifs[IEEE80211_AC_VI]);
 +  requested_aifs[IEEE80211_AC_BE] = READ_ONCE(priv->requested_aifs[IEEE80211_AC_BE]);
@@ -12657,14 +12682,19 @@ index 0000000..b72f0ff
 +  requested_txop[IEEE80211_AC_BK] = READ_ONCE(priv->requested_txop[IEEE80211_AC_BK]);
 +  ret_size = sysfs_emit(buf,
 +    "FPGA AIFS_CFG raw: %08x\n"
-+    "FPGA AIFSN q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n"
-+    "REQ  AIFSN q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n"
-+    "REQ  TXOP  q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n",
++    "FPGA AIFSN raw q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n"
++    "FPGA AIFSN eff q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n"
++    "CACHE AIFSN q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n"
++    "CACHE TXOP  q0/q1/q2/q3 (VO/VI/BE/BK): %u %u %u %u\n",
 +    reg_val,
-+    (reg_val >> OW_SYSFS_AIFS_Q0_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK,
-+    (reg_val >> OW_SYSFS_AIFS_Q1_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK,
-+    (reg_val >> OW_SYSFS_AIFS_Q2_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK,
-+    (reg_val >> OW_SYSFS_AIFS_Q3_SHIFT) & OW_SYSFS_AIFS_FIELD_MASK,
++    raw_aifs[IEEE80211_AC_VO],
++    raw_aifs[IEEE80211_AC_VI],
++    raw_aifs[IEEE80211_AC_BE],
++    raw_aifs[IEEE80211_AC_BK],
++    effective_aifs[IEEE80211_AC_VO],
++    effective_aifs[IEEE80211_AC_VI],
++    effective_aifs[IEEE80211_AC_BE],
++    effective_aifs[IEEE80211_AC_BK],
 +    requested_aifs[IEEE80211_AC_VO],
 +    requested_aifs[IEEE80211_AC_VI],
 +    requested_aifs[IEEE80211_AC_BE],
@@ -12742,7 +12772,7 @@ index 0000000..b72f0ff
 +    READ_ONCE(priv->stat.tx_ampdu_tx_operational_count));
 +
 +  ret_size += sysfs_emit_at(buf, ret_size,
-+    "TX AMPDU BA nonzero/zero/no_ba/unexpected_ack: %u %u %u %u\n",
++    "TX AMPDU BA nonzero/zero/no_ba/unexpected_ack_legacy: %u %u %u %u\n",
 +    READ_ONCE(priv->stat.tx_ampdu_ba_nonzero_bitmap_count),
 +    READ_ONCE(priv->stat.tx_ampdu_ba_zero_bitmap_count),
 +    READ_ONCE(priv->stat.tx_ampdu_no_ba_count),

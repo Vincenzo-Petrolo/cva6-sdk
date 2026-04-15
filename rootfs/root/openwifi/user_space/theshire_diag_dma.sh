@@ -166,7 +166,8 @@ print_full_snapshot() {
   echo "DMA sysfs counters:"
   for attr in tx_dma_stall_enter_count tx_dma_stall_clear_count tx_dma_timeout_count \
               tx_dma_error_count tx_dma_hard_stop_count rx_dma_wd_restart_count; do
-    val="$(cat /sys/devices/platform/sdr/${attr} 2>/dev/null || \
+    val="$(cat /sys/devices/platform/soc/soc:sdr/${attr} 2>/dev/null || \
+           cat /sys/devices/platform/sdr/${attr} 2>/dev/null || \
            cat /sys/devices/platform/soc/sdr/${attr} 2>/dev/null || echo 'n/a')"
     printf "  %-35s %s\n" "${attr}:" "$val"
   done
@@ -311,7 +312,8 @@ run_decision_tree() {
   echo
   echo "DMA sysfs stall counters:"
   for attr in tx_dma_stall_enter_count tx_dma_error_count tx_dma_timeout_count; do
-    val="$(cat /sys/devices/platform/sdr/${attr} 2>/dev/null || \
+    val="$(cat /sys/devices/platform/soc/soc:sdr/${attr} 2>/dev/null || \
+           cat /sys/devices/platform/sdr/${attr} 2>/dev/null || \
            cat /sys/devices/platform/soc/sdr/${attr} 2>/dev/null || echo 'n/a')"
     printf "  %-35s %s\n" "${attr}:" "$val"
     if [[ "$val" != "0" ]] && [[ "$val" != "n/a" ]]; then

@@ -88,6 +88,12 @@ Laptop plain receive:
 Laptop source file for plain/scp push:
   dd if=/dev/urandom of=${DEFAULT_FILE} bs=1M count=${DEFAULT_SIZE_MB}
 
+Board plain receive:
+  bash ./openwifi_crypto_probe.sh recv-plain ${port} /tmp/openwifi_crypto_probe.push.recv
+
+Laptop plain send:
+  nc ${board_ip} ${port} < ${DEFAULT_FILE}
+
 Board plain send:
   bash ./openwifi_crypto_probe.sh send-plain ${laptop_ip} ${port} ${DEFAULT_FILE}
 

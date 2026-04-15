@@ -1,11 +1,17 @@
 # kind	source_path	dest_path
 glue	-	drivers/Kconfig
 glue	-	drivers/Makefile
+# synthetic row: regen derives this from the canonical OpenWiFi repo HEAD
+# hash via write_openwifi_git_rev_header(), not by copying the checked-out
+# driver/git_rev.h contents verbatim
 copy	driver/git_rev.h	drivers/git_rev.h
 copy	driver/hw_def.h	drivers/hw_def.h
 copy	driver/nl80211_testmode_def.h	drivers/nl80211_testmode_def.h
 copy	driver/openofdm_rx/openofdm_rx.c	drivers/openofdm_rx/openofdm_rx.c
 copy	driver/openofdm_tx/openofdm_tx.c	drivers/openofdm_tx/openofdm_tx.c
+# synthetic row: regen derives this from top-level OpenWiFi Makefile defaults
+# via write_openwifi_pre_def_header(), not by copying the checked-out
+# driver/pre_def.h contents verbatim
 copy	driver/pre_def.h	drivers/pre_def.h
 copy	driver/rx_intf/rx_intf.c	drivers/rx_intf/rx_intf.c
 copy	driver/sdr.c	drivers/sdr.c
