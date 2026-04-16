@@ -5866,10 +5866,10 @@ index 0000000..dfa73db
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..e9cd6a4
+index 0000000..36f81da
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1431 @@
+@@ -0,0 +1,1428 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -5994,9 +5994,10 @@ index 0000000..e9cd6a4
 + *
 + * The maintained XPU contract exposes one active RX BA peer/TID session plus
 + * the negotiated SSN used by the BA window logic. Guarding the mac80211 AMPDU
-+ * metadata here still keys only on peer/TID, because per-MPDU sequence control
-+ * is taken from the received frame itself while stale aggregate bits can still
-+ * appear transiently during teardown or restart.
++ * metadata here intentionally keys only on peer/TID. The start SSN is written
++ * once at session start for the hardware BA window, but it is not a moving
++ * software receive-window cursor, so using it as a per-MPDU lower bound would
++ * eventually reject valid wrapped sequence numbers in long-lived sessions.
 + *
 + * @param priv Driver private state.
 + * @param hdr 802.11 header pointer for the received MPDU.
@@ -6010,7 +6011,6 @@ index 0000000..e9cd6a4
 +{
 +  unsigned long flags;
 +  unsigned int hdr_len_bytes;
-+  u16 seq_num;
 +  bool allowed;
 +
 +  if (!ieee80211_is_data_qos(hdr->frame_control)) {
@@ -6022,13 +6022,10 @@ index 0000000..e9cd6a4
 +    return false;
 +  }
 +
-+  seq_num = (le16_to_cpu(hdr->seq_ctrl) & IEEE80211_SCTL_SEQ) >> OW_IEEE80211_SEQ_CTRL_SHIFT_BITS;
-+
 +  spin_lock_irqsave(&priv->lock, flags);
 +  allowed = (priv->rx_ba_active &&
 +    priv->rx_ba_tid == ieee80211_get_tid(hdr) &&
-+    ether_addr_equal(priv->rx_ba_peer_addr, hdr->addr2) &&
-+    !ieee80211_sn_less(seq_num, priv->rx_ba_ssn));
++    ether_addr_equal(priv->rx_ba_peer_addr, hdr->addr2));
 +  spin_unlock_irqrestore(&priv->lock, flags);
 +
 +  return allowed;

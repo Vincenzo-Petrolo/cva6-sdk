@@ -45,6 +45,23 @@ need_cmd() {
   fi
 }
 
+timeout_prefix_for_capture() {
+  local capture_sec="$1"
+
+  if command -v timeout >/dev/null 2>&1; then
+    printf 'timeout\0%ss\0' "$capture_sec"
+    return 0
+  fi
+
+  if command -v busybox >/dev/null 2>&1 && busybox timeout 1 true >/dev/null 2>&1; then
+    printf 'busybox\0timeout\0%s\0' "$capture_sec"
+    return 0
+  fi
+
+  echo "Missing required command: timeout (or busybox timeout)" >&2
+  exit 1
+}
+
 ensure_debugfs() {
   mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
   mount -t tracefs none /sys/kernel/tracing 2>/dev/null || true
@@ -73,6 +90,7 @@ main() {
   local ts
   local out_dir
   local -a command_argv=()
+  local -a bounded_prefix=()
 
   if [[ "${1:-}" = "-h" || "${1:-}" = "--help" ]]; then
     usage
@@ -84,6 +102,7 @@ main() {
   ensure_debugfs
 
   capture_sec="$(resolve_capture_sec "$mode")"
+  mapfile -d '' -t bounded_prefix < <(timeout_prefix_for_capture "$capture_sec")
   ts="$(date +%Y%m%d_%H%M%S)"
   out_dir="/tmp/openwifi_trace_${mode}_${ts}"
   mkdir -p "$out_dir"
@@ -109,7 +128,7 @@ main() {
   echo "Trace output dir: ${out_dir}"
 
   if [[ ${#command_argv[@]} -gt 0 ]]; then
-    echo "Recording command trace: ${command_argv[*]}"
+    echo "Recording command trace for up to ${capture_sec}s: ${command_argv[*]}"
     trace-cmd record \
       -o "${out_dir}/trace.dat" \
       -e sched:sched_switch \
@@ -120,7 +139,7 @@ main() {
       -e irq:softirq_exit \
       -e net:net_dev_queue \
       -e skb:kfree_skb \
-      -- "${command_argv[@]}"
+      -- "${bounded_prefix[@]}" "${command_argv[@]}"
   else
     echo "Recording ${capture_sec}s idle window; run the traffic or association manually now."
     trace-cmd record \

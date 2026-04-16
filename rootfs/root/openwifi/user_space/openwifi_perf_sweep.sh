@@ -35,14 +35,24 @@ set -euo pipefail
 
 peer_ip="${1:-}"
 iface="${2:-$OPENWIFI_IFACE}"
+original_kernel_printk="$(cat /proc/sys/kernel/printk 2>/dev/null || true)"
 
 if [[ -z "$peer_ip" ]]; then
   echo "Usage: $0 <peer_ip> [iface]" >&2
   exit 1
 fi
 
-# Keep console logging verbose enough that OpenWiFi warnings stay visible on the
-# serial console throughout the sweep.
+restore_kernel_printk() {
+  if [[ -n "$original_kernel_printk" ]]; then
+    printf '%s\n' "$original_kernel_printk" > /proc/sys/kernel/printk 2>/dev/null || true
+  fi
+}
+
+trap restore_kernel_printk EXIT
+
+# Keep console logging verbose enough that OpenWiFi warnings stay visible while
+# the sweep is running, but restore the prior setting on exit so later traffic
+# measurements are not polluted by verbose console printk.
 echo 7 > /proc/sys/kernel/printk
 
 need_cmd() {

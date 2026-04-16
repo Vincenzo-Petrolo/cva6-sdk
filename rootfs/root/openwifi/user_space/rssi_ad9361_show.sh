@@ -4,15 +4,11 @@
 # rssi_ad9361_show.sh — AD9361 RSSI readback via IIO sysfs
 #
 # Usage: ./rssi_ad9361_show.sh <num_reads>
-# Reads in_voltage0_rssi from AD9361 IIO device and applies calibration offset.
+# Reads the raw in_voltage0_rssi value from the AD9361 IIO device.
 #
-# Reads RSSI in dB from RX1, let's call it "r".
-# Linear fit offset "o" depends on frequency (2.4GHz or 5GHz and FMCOMMS2/3).
-# RSSI(dBm) = -r + o
-# 2.4GHz(ch 6) FMCOMMS2: o = 16.74
-# 2.4GHz(ch 6) FMCOMMS3: o = 17.44
-# 5GHz (ch 44) FMCOMMS2: o = 25.41
-# 5GHz (ch 44) FMCOMMS3: o = 24.58
+# Output is the AD9361-provided RSSI readback in dB from RX1. This helper does
+# not apply any frequency- or board-dependent calibration offset, so do not
+# interpret the printed value as calibrated dBm directly.
 #
 # Author: Xianjun Jiao
 # Author: Andreas T. Kristensen (ZCU104 port)

@@ -13,6 +13,7 @@ Current OpenWiFi-related overlay additions:
 - `root/openwifi/user_space/openwifi_trace_capture.sh`: bounded `trace-cmd` capture helper for short association / upload / download windows. Use only after collecting an untraced baseline.
 - `root/openwifi/user_space/openwifi_laptop_ap_connect.sh`: Theshire-local matched laptop-AP helper for the controlled open vs WPA2 static-IP harness. Kept separate from the generic `openwifi_client.sh` commercial-AP workflow.
 - `root/openwifi/user_space/openwifi_crypto_probe.sh`: Theshire-local plain-vs-SSH transfer helper for measuring application-layer crypto overhead separately from raw WiFi throughput.
+- `root/openwifi/user_space/theshire_diag_dma.sh`: Theshire-local DMA health diagnostic helper for the CVA6/ZCU104 address map. Not part of the mirrored upstream script manifest.
 - `root/openwifi/user_space/openwifi_common.sh`: shared helper (sysfs detection, interface auto-detect)
 - `root/openwifi/user_space/monitor_ch.sh`: theshire-specific override (iw instead of iwconfig)
 - `root/openwifi/user_space/nic_back_to_normal.sh`: theshire-specific override (iw instead of iwconfig)
@@ -21,7 +22,7 @@ Current OpenWiFi-related overlay additions:
 - `etc/openwifi/udhcpd-openwifi.conf`: DHCP server config for AP mode
 - `etc/init.d/S80openwifi`: boot-time WiFi init (regulatory domain, FIR filters)
 
-The `openwifi_perf_snapshot.sh`, `openwifi_perf_sweep.sh`, `openwifi_trace_capture.sh`, `openwifi_laptop_ap_connect.sh`, and `openwifi_crypto_probe.sh` helpers are Theshire-local overlay scripts. They are documented in the Theshire guides and are intentionally not part of the mirrored `openwifi/user_space/` refresh set.
+The `openwifi_perf_snapshot.sh`, `openwifi_perf_sweep.sh`, `openwifi_trace_capture.sh`, `openwifi_laptop_ap_connect.sh`, `openwifi_crypto_probe.sh`, and `theshire_diag_dma.sh` helpers are Theshire-local overlay scripts. They are documented in the Theshire guides and are intentionally not part of the mirrored `openwifi/user_space/` refresh set.
 
 For target-side usage of the WiFi client helper, see `docs/guide_test_wifi_client.md` in the parent Theshire repo.
 For diagnostic tools reference, see `docs/guide_debug_openwifi.md` in the parent Theshire repo.
