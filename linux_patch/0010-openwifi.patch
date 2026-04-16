@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..3a64231
+index 0000000..bc9d35b
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0x967f7a3
++#define GIT_REV 0xfd00e7c
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..85a4c9a
