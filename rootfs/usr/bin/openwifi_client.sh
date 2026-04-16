@@ -47,8 +47,14 @@ need_cmd() {
   fi
 }
 
-# Find the first wireless interface reported by iw.
+# Prefer theshire's wlan0 default, then fall back to the first wireless
+# interface reported by iw.
 find_openwifi_iface() {
+  iface="$(iw dev 2>/dev/null | awk '$1 == "Interface" && $2 == "wlan0" { print $2; exit }')"
+  if [ -n "$iface" ]; then
+    echo "$iface"
+    return 0
+  fi
   iw dev 2>/dev/null | awk '$1 == "Interface" { print $2; exit }'
 }
 

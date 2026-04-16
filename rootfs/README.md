@@ -7,7 +7,7 @@ Current OpenWiFi-related overlay additions:
 - `usr/bin/openwifi_client.sh`: thin client-mode helper around `iw`, `wpa_supplicant`, `wpa_cli`, `wpa_passphrase`, and `udhcpc`
 - `usr/bin/openwifi_ap`: AP mode helper (hostapd + udhcpd). Still degraded for deployment, but intentionally kept for controlled AP-side testing; see `docs/todo/todo_openwifi_tx_auth_failure.md` in the parent Theshire repo
 - `usr/bin/spi_ad9361_ping`: AD9361 SPI ping helper built from Theshire source
-- `root/openwifi/user_space/*.sh`: ~35 OpenWiFi diagnostic/test scripts (regenerated from `util/regen_openwifi_scripts.sh`). Includes: CSMA bypass, RX/TX stats, AGC, RSSI, CSI fuzzing, raw IQ, monitor mode. See `docs/guide_debug_openwifi.md` in the parent Theshire repo
+- `root/openwifi/user_space/*.sh`: ~35 OpenWiFi diagnostic/test scripts (regenerated from the parent Theshire repo helper `util/regen_openwifi_scripts.sh`). Includes: CSMA bypass, RX/TX stats, AGC, RSSI, CSI fuzzing, raw IQ, monitor mode. See `docs/guide_debug_openwifi.md` in the parent Theshire repo
 - `root/openwifi/user_space/openwifi_perf_snapshot.sh`: one-shot STA/AP performance snapshot (link, station dump, TX/RX stats, queue state, key dmesg markers, rc_stats when available). Theshire-local overlay helper, not part of the mirrored upstream script manifest. Reports whether `stat_enable=1`, so packet-counter sections can be interpreted honestly.
 - `root/openwifi/user_space/openwifi_perf_sweep.sh`: cautious associated-link sweep helper (receiver sensitivity + `quickack`, with `iperf3` + snapshot capture)
 - `root/openwifi/user_space/openwifi_trace_capture.sh`: bounded `trace-cmd` capture helper for short association / upload / download windows. Use only after collecting an untraced baseline.

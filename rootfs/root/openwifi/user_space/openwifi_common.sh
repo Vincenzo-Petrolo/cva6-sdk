@@ -22,13 +22,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #==============================================================================
 
-# Interface auto-detect: prefer sdr* (OpenWiFi data NIC), then first wireless,
-# then hardcoded sdr0 fallback.  This ordering avoids picking up mon0 or a USB
-# WiFi dongle's wlan0 when both coexist with the SDR interface.
+# Interface auto-detect: prefer sdr* (OpenWiFi data NIC), then wlan0
+# (theshire/CVA6 built-in default), then the first wireless interface, then a
+# hardcoded sdr0 fallback. This keeps upstream Zynq on sdr0 while avoiding an
+# unrelated USB dongle stealing OPENWIFI_IFACE on theshire.
 # Exported so child scripts (e.g., csi_fuzzer.sh called from csi_fuzzer_scan.sh)
 # inherit it without re-running iw dev on every invocation.
 if [[ -z "${OPENWIFI_IFACE:-}" ]]; then
   OPENWIFI_IFACE=$(iw dev 2>/dev/null | awk '$1 == "Interface" && $2 ~ /^sdr/ { print $2; exit }' || true)
+  if [[ -z "$OPENWIFI_IFACE" ]]; then
+    OPENWIFI_IFACE=$(iw dev 2>/dev/null | awk '$1 == "Interface" && $2 == "wlan0" { print $2; exit }' || true)
+  fi
   if [[ -z "$OPENWIFI_IFACE" ]]; then
     OPENWIFI_IFACE=$(iw dev 2>/dev/null | awk '$1 == "Interface" { print $2; exit }' || true)
   fi
@@ -47,7 +51,7 @@ export OPENWIFI_DATA_DIR
 #------------------------------------------------------------------------------
 # openwifi_cd_sdr_sysfs — cd to the sdr sysfs directory
 #
-# Checks five paths (theshire `soc:sdr`, theshire platform-root fallback,
+# Checks five paths (theshire `soc:sdr`, theshire root-level fallback,
 # theshire `/soc/sdr` fallback, Zynq newer, Zynq older) and exits with an
 # error if none found.
 #

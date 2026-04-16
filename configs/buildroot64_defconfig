@@ -9,7 +9,7 @@
 # Topics may appear in both Required and Optional (e.g., Network has core
 # connectivity tools in Required and diagnostic tools in Optional).
 #
-# Rebuild with: make chs-linux-rebuild (from repo root)
+# Rebuild from the parent theshire repo root with: make chs-linux-rebuild
 #==============================================================================
 
 #==============================================================================

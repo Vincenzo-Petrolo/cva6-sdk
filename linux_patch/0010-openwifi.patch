@@ -23,11 +23,11 @@ index 5762280..46b22fc 100644
 +obj-$(CONFIG_OPENWIFI)		+= tx_intf/tx_intf.o rx_intf/rx_intf.o openofdm_tx/openofdm_tx.o openofdm_rx/openofdm_rx.o xpu/xpu.o side_ch/side_ch.o sdr.o
 diff --git a/drivers/git_rev.h b/drivers/git_rev.h
 new file mode 100644
-index 0000000..84e54b6
+index 0000000..3a64231
 --- /dev/null
 +++ b/drivers/git_rev.h
 @@ -0,0 +1 @@
-+#define GIT_REV 0xcbe4c3d
++#define GIT_REV 0x967f7a3
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
 index 0000000..85a4c9a
@@ -4992,10 +4992,10 @@ index 0000000..d3676fd
 +#endif /* OPENWIFI_SDR */
 diff --git a/drivers/sdr_mac_ops.c b/drivers/sdr_mac_ops.c
 new file mode 100644
-index 0000000..0e7ad6a
+index 0000000..dfa73db
 --- /dev/null
 +++ b/drivers/sdr_mac_ops.c
-@@ -0,0 +1,859 @@
+@@ -0,0 +1,868 @@
 +/**
 + * @file sdr_mac_ops.c
 + * @brief mac80211 operation callbacks for the OpenWiFi SDR driver.
@@ -5137,17 +5137,20 @@ index 0000000..0e7ad6a
 + *
 + * @param hw mac80211 hardware handle.
 + * @param value Requested RTS threshold.
-+ * @return 0 because mac80211 applies the threshold in its per-frame RTS
-+ *         decision path even though the maintained FPGA path has no extra
-+ *         threshold register to program here.
++ * @return 0 because the local mac80211 stack still uses the threshold in its
++ *         per-frame protection decision path even though the maintained FPGA
++ *         path has no extra threshold register and RTS requests currently map
++ *         to CTS-to-self fallback in the TX path.
 + * @note TODO(openwifi-rts-threshold-hw): add a hardware-specific threshold
 + *       register only if the maintained path needs behavior beyond the
-+ *       mac80211/software-managed RTS decision.
++ *       mac80211/software-managed protection decision plus the current
++ *       CTS-to-self fallback.
 + */
 +static int openwifi_set_rts_threshold(struct ieee80211_hw *hw, u32 value)
 +{
 +  (void)hw;
-+  printk_ratelimited("%s openwifi_set_rts_threshold value %u (mac80211-managed)\n", sdr_compatible_str, value);
++  printk_ratelimited("%s openwifi_set_rts_threshold value %u (mac80211-managed, RTS requests may map to CTS-to-self)\n",
++    sdr_compatible_str, value);
 +  return 0;
 +}
 +
@@ -5791,6 +5794,12 @@ index 0000000..0e7ad6a
 +      return -EBUSY;
 +    }
 +
++    if (priv->rx_ba_active) {
++      /* Same-peer same-TID RX_START is a semantic restart: the hardware
++       * clear/start pulse resets BA history, so advance the software-side
++       * aggregate boundary as well. */
++      priv->ampdu_reference++;
++    }
 +    priv->rx_ba_active = true;
 +    priv->rx_ba_tid = params->tid;
 +    priv->rx_ba_ssn = rx_ba_ssn;
