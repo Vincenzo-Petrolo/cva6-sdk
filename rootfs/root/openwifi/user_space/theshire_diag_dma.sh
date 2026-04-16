@@ -39,9 +39,7 @@ SIDE_RX_DMA=0x40011000
 
 # OpenWiFi IP bases (for PHY/XPU context)
 RX_INTF=0x40040000
-TX_INTF=0x40060000
 XPU=0x40070000
-AXI_AD9361=0x40080000
 
 #==============================================================================
 # ADI axi_dmac register offsets (same across all instances)
@@ -61,11 +59,8 @@ OFF_ACTIVE_ID=0x42c
 OFF_STATUS=0x430
 OFF_CUR_DEST=0x434
 OFF_CUR_SRC=0x438
-OFF_DBG0=0x43c
-OFF_DBG1=0x440
 OFF_DBG2=0x444
 OFF_PART_LEN=0x44c
-OFF_PART_ID=0x450
 
 #==============================================================================
 # Helpers
@@ -95,7 +90,7 @@ reg_to_dec() {
 read_dma_reg() {
   local base="$1"
   local offset="$2"
-  read_reg32 $(printf '0x%08X' $((base + offset)))
+  read_reg32 "$(printf '0x%08X' "$((base + offset))")"
 }
 
 irq_count_by_pattern() {
@@ -149,9 +144,9 @@ print_full_snapshot() {
   print_dma_snapshot "Side RX DMA" "$SIDE_RX_DMA"
 
   echo "OpenWiFi context:"
-  printf "  XPU CSMA_CFG (reg19):  %s  (expect 0xA4A44332)\n" "$(read_reg32 $(printf '0x%08X' $((XPU + 19*4))))"
+  printf "  XPU CSMA_CFG (reg19):  %s  (startup default often 0xA4A44332; runtime follows current EDCA state)\n" "$(read_reg32 "$(printf '0x%08X' "$((XPU + 19*4))")")"
   printf "  DAC DATA_SEL (ch0):    %s  (expect 0x2: DMA mode)\n" "$(read_reg32 0x40084418)"
-  printf "  rx_intf loopback:      %s  (expect 0x0: normal)\n" "$(read_dma_reg $RX_INTF 0x0C)"
+  printf "  rx_intf loopback:      %s  (expect 0x0: normal)\n" "$(read_dma_reg "$RX_INTF" 0x0C)"
   echo
 
   echo "Interrupt lines:"
