@@ -102,8 +102,6 @@ run_case() {
 
   if [[ "$quickack_flag" = "1" ]]; then
     ip route replace "$peer_net" dev "$iface" quickack 1
-    echo 0 > /proc/sys/net/ipv4/tcp_slow_start_after_idle
-    echo 1 > /proc/sys/net/ipv4/tcp_no_metrics_save
   else
     ip route replace "$peer_net" dev "$iface"
   fi
@@ -123,7 +121,7 @@ run_case() {
 
 # Conservative first sweep:
 # - receiver sensitivity at two values already observed to matter
-# - with and without quickack
+# - with and without the route quickack flag only
 run_case "drv60_qack0" 60 0
 run_case "drv60_qack1" 60 1
 run_case "drv65_qack0" 65 0

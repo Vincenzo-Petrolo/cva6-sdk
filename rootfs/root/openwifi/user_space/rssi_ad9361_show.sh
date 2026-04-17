@@ -9,6 +9,12 @@
 # Output is the AD9361-provided RSSI readback in dB from RX1. This helper does
 # not apply any frequency- or board-dependent calibration offset, so do not
 # interpret the printed value as calibrated dBm directly.
+# Historical empirical offsets that were used for manual post-processing:
+# RSSI(dBm) ~= -r + o
+# 2.4GHz(ch 6) FMCOMMS2: o = 16.74
+# 2.4GHz(ch 6) FMCOMMS3: o = 17.44
+# 5GHz (ch 44) FMCOMMS2: o = 25.41
+# 5GHz (ch 44) FMCOMMS3: o = 24.58
 #
 # Author: Xianjun Jiao
 # Author: Andreas T. Kristensen (ZCU104 port)

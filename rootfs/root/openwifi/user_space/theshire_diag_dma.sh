@@ -17,8 +17,8 @@
 # DMA base addresses (from cheshire.zcu104.dts):
 #   TX DMA:      0x40000000  (dma_tx — DDR → WiFi baseband)
 #   RX DMA:      0x40010000  (dma_rx — WiFi baseband → DDR)
-#   Side TX DMA: 0x40001000  (dma_side_tx — DDR → side_ch)
-#   Side RX DMA: 0x40011000  (dma_side_rx — side_ch → DDR)
+#   Side TX DMA: 0x40001000  (dma_side_tx — side_ch → DDR)
+#   Side RX DMA: 0x40011000  (dma_side_rx — DDR → side_ch)
 #
 # Register offsets are identical to Zynq ADI axi_dmac — only the base differs.
 #

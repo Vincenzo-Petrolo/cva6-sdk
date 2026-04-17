@@ -10,7 +10,8 @@
 # client association can complete, but DHCP/data traffic remains unreliable due
 # to high data-frame ACK failure rate. The bundled hostapd config keeps
 # `wmm_enabled=1` explicit for deterministic HT/AMPDU negotiation during AP
-# testing. See docs/todo/todo_openwifi_tx_auth_failure.md.
+# testing. See parent theshire docs: `docs/guide_debug_openwifi.md` and
+# `docs/guide_test_throughput.md`.
 #
 # Supported commands:
 #   start   — start AP mode on wlan0
@@ -54,7 +55,7 @@ warn_tx_ack() {
   echo "  Beacons broadcast — AP is VISIBLE to nearby devices."
   echo "  Client association may succeed, but DHCP/data traffic remains unreliable."
   echo "  This AP path is still useful for controlled Wi-Fi-side testing."
-  echo "  See: docs/todo/todo_openwifi_tx_auth_failure.md"
+  echo "  See parent theshire docs: docs/guide_debug_openwifi.md and docs/guide_test_throughput.md"
   echo ""
 }
 

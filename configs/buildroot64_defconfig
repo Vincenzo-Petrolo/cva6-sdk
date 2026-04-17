@@ -102,7 +102,7 @@ BR2_PACKAGE_TRACE_CMD=y
 BR2_PACKAGE_BASH=y
 
 #------------------------------------------------------------------------------
-# WiFi — AP mode testing (beacons visible; client assoc blocked by TX ACK timing)
+# WiFi — AP mode testing (beacons visible; association may complete; DHCP/data still unreliable)
 #------------------------------------------------------------------------------
 BR2_PACKAGE_HOSTAPD=y
 BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
