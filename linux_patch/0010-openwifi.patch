@@ -30,10 +30,10 @@ index 0000000..06ec164
 +#define GIT_REV 0x82d0f49
 diff --git a/drivers/hw_def.h b/drivers/hw_def.h
 new file mode 100644
-index 0000000..85a4c9a
+index 0000000..2364ced
 --- /dev/null
 +++ b/drivers/hw_def.h
-@@ -0,0 +1,690 @@
+@@ -0,0 +1,713 @@
 +// Author: Xianjun jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -202,6 +202,29 @@ index 0000000..85a4c9a
 +                                                    OW_TX_INTF_RESET_CTRL_PATH_MASK | \
 +                                                    OW_TX_INTF_RESET_IQ_INTF_MASK | \
 +                                                    OW_TX_INTF_RESET_S_AXIS_MASK)
++
++/* TX_INTF_REG_CTS_TOSELF_CONFIG bit layout.
++ * RTL consumer: tx_control.v. Software producer: sdr_tx.c openwifi_tx(). */
++#define OW_TX_CTS_TOSELF_ENABLE_SHIFT              31U
++#define OW_TX_CTS_TOSELF_USE_TRAFFIC_RATE_SHIFT    30U
++#define OW_TX_CTS_TOSELF_DURATION_SHIFT             8U
++#define OW_TX_CTS_TOSELF_CTS_RATE_SHIFT             4U
++
++/* TX_INTF_REG_TX_CONFIG bit layout.
++ * RTL consumer: tx_control.v. Software producer: sdr_tx.c openwifi_tx(). */
++#define OW_TX_CONFIG_PRIO_SHIFT                    26U
++#define OW_TX_CONFIG_BD_IDX_SHIFT                  20U
++#define OW_TX_CONFIG_QUEUE_SHIFT                   18U
++#define OW_TX_CONFIG_RETRY_LIMIT_SHIFT             14U
++#define OW_TX_CONFIG_NEED_ACK_SHIFT                13U
++
++/* TX_INTF_REG_PHY_HDR_CONFIG bit layout.
++ * RTL consumer: tx_control.v. Software producer: sdr_tx.c openwifi_tx(). */
++#define OW_TX_PHY_HDR_AGGR_START_SHIFT             20U
++#define OW_TX_PHY_HDR_RATE_SHIFT                   16U
++#define OW_TX_PHY_HDR_USE_HT_RATE_SHIFT            15U
++#define OW_TX_PHY_HDR_SHORT_GI_SHIFT               14U
++#define OW_TX_PHY_HDR_USE_HT_AGGR_SHIFT            13U
 +
 +/* TX_INTF_REG_AMPDU_ACTION_CONFIG bit layout.
 + * RTL consumer: tx_bit_intf.v.
@@ -1714,10 +1737,10 @@ index 0000000..053b515
 +MODULE_LICENSE("GPL v2");
 diff --git a/drivers/sdr.c b/drivers/sdr.c
 new file mode 100644
-index 0000000..64b371b
+index 0000000..6a539e7
 --- /dev/null
 +++ b/drivers/sdr.c
-@@ -0,0 +1,2217 @@
+@@ -0,0 +1,2218 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu, Jetmir Haxhibeqiri, Pablo Avila Campos
 +// SPDX-FileCopyrightText: 2022 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3308,6 +3331,7 @@ index 0000000..64b371b
 +  ieee80211_hw_set(dev, SIGNAL_DBM);
 +  wiphy_ext_feature_set(dev->wiphy, NL80211_EXT_FEATURE_CQM_RSSI_LIST);
 +
++  dev->max_tx_aggregation_subframes = OW_TX_AMPDU_BUF_SIZE_MAX;
 +  dev->extra_tx_headroom = LEN_MPDU_DELIM;
 +  dev->vif_data_size = sizeof(struct openwifi_vif);
 +  dev->queues = MAX_NUM_HW_QUEUE;
@@ -3937,10 +3961,10 @@ index 0000000..64b371b
 +module_platform_driver(openwifi_dev_driver);
 diff --git a/drivers/sdr.h b/drivers/sdr.h
 new file mode 100644
-index 0000000..d3676fd
+index 0000000..fc152fd
 --- /dev/null
 +++ b/drivers/sdr.h
-@@ -0,0 +1,1064 @@
+@@ -0,0 +1,1091 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -3988,7 +4012,7 @@ index 0000000..d3676fd
 + *
 + * Lifecycle: populated in openwifi_tx() after successful DMA submit,
 + * consumed in openwifi_tx_interrupt() for status reporting and cleanup,
-+ * cleared by ow_tx_bd_clear() or the manual clear block in the interrupt.
++ * cleared by ow_tx_bd_clear() in interrupt and recovery paths.
 + *
 + * The ring uses bd_wr_idx (producer, openwifi_tx) and bd_rd_idx (consumer,
 + * openwifi_tx_interrupt).  A slot with seq_no == OPENWIFI_TX_SEQ_INVALID
@@ -4007,16 +4031,6 @@ index 0000000..d3676fd
 +                                           * 3 bytes packed — fits in 4-byte padding gap
 +                                           * before bounce_buf pointer. */
 +  void *bounce_buf; /* aligned bounce buffer (NULL when not used) */
-+};
-+
-+struct openwifi_ring {
-+  struct openwifi_buffer_descriptor *bds;
-+  u32 bd_wr_idx;
-+  u32 bd_rd_idx;
-+  int stop_flag; /* debug mirror of one stopped priority; -1 when none */
-+  u8 stop_prio_mask;
-+  // u32 num_dma_symbol_request;
-+  // u32 reserved;
 +};
 +
 +/**
@@ -4063,13 +4077,6 @@ index 0000000..d3676fd
 +  u8     retry_limit_raw;
 +  u8     use_short_gi;
 +};
-+
-+/* Maximum TX completions deferred to Phase TX-B (unlocked) per interrupt.
-+ * Size this high enough to absorb most aggregate completions without tripping
-+ * the kernel frame-size warning on the maintained targets. 56 entries keep the
-+ * stack frame below the 2 KiB warning threshold while still making the inline
-+ * overflow path much rarer than the original 16-entry budget. */
-+#define OW_TX_DONE_BUDGET  56U
 +
 +struct openwifi_vif {
 +  struct ieee80211_hw *dev;
@@ -4365,6 +4372,19 @@ index 0000000..d3676fd
 +static_assert(OW_NUM_SW_QUEUE <= OW_NUM_HW_QUEUE);
 +static_assert(OW_RING_ROOM_THRESHOLD_BD < OW_NUM_TX_BD);
 +
++/* 802.11n HT BlockAck window limit for TX_INTF_REG_AMPDU_ACTION_CONFIG.buf_size.
++ * Cross-check driver/hw_def.h (OW_AMPDU_ACTION_CONFIG_BUF_SIZE_MASK = 0x3f)
++ * and openwifi-hw:boards/zcu104_fmcs2/ip_repo/tx_intf/src/tx_bit_intf.v
++ * (ampdu_action_config[21:16]). Keep the mac80211 local TX aggregation cap
++ * after AddBA response handling and TX_INTF programming on the same contract. */
++#define OW_TX_AMPDU_BUF_SIZE_MAX             63U
++
++/* TX completion defer capacity: one entry per possible in-flight TX BD across
++ * all software rings. This is a driver storage invariant, not a negotiated BA
++ * window cap. */
++#define OW_TX_DONE_CAPACITY  (MAX_NUM_SW_QUEUE * NUM_TX_BD)
++static_assert(OW_TX_DONE_CAPACITY > OW_TX_AMPDU_BUF_SIZE_MAX);
++
 +/* RX buffer header layout (set by rx_intf_pl_to_m_axis.v FPGA module):
 + * Offset 0:  tsft_low (u32)    Offset 4:  tsft_high (u32)
 + * Offset 8:  rssi_half_db (u16) Offset 10: agc_status_and_pkt_exist_flag (u16)
@@ -4384,6 +4404,36 @@ index 0000000..d3676fd
 +#define MAX_PHY_TX_SN ((1 << NUM_BIT_MAX_PHY_TX_SN) - 1)
 +#define OPENWIFI_TX_SEQ_INVALID            0xFFFFU
 +#define OPENWIFI_TX_PRIO_INVALID           0xFFU
++
++/**
++ * @brief One reclaimed TX descriptor snapshot (copied before ring clear).
++ */
++struct ow_tx_reclaim_entry {
++  struct sk_buff *skb_linked;
++  dma_addr_t dma_mapping_addr;
++  u32 dma_len_bytes;
++  void *bounce_buf;
++  u16 len_mpdu;
++};
++
++/**
++ * @brief Per-software-queue TX ring state.
++ *
++ * fake_stop_reclaim is ring-owned scratch storage for the stale-BD cleanup
++ * path in openwifi_tx(). Keeping it preallocated removes GFP_ATOMIC from TX
++ * submission. The TX path snapshots into this array under priv->lock and keeps
++ * tx_submit_lock held until unlocked finalization is complete.
++ */
++struct openwifi_ring {
++  struct openwifi_buffer_descriptor *bds;
++  struct ow_tx_reclaim_entry fake_stop_reclaim[NUM_TX_BD];
++  u32 bd_wr_idx;
++  u32 bd_rd_idx;
++  int stop_flag; /* debug mirror of one stopped priority; -1 when none */
++  u8 stop_prio_mask;
++  // u32 num_dma_symbol_request;
++  // u32 reserved;
++};
 +
 +/* AD9361 attenuation values are in mdB (milli-dB). */
 +#define AD9361_RADIO_OFF_TX_ATT      89750U /* aligned with ADI ad9361.c mute attenuation */
@@ -4867,6 +4917,7 @@ index 0000000..d3676fd
 +  struct ieee80211_hw            *hw;
 +
 +  struct openwifi_ring           tx_ring[MAX_NUM_SW_QUEUE];
++  struct ow_tx_done_entry        tx_done_entries[OW_TX_DONE_CAPACITY];
 +  struct scatterlist             tx_sg;
 +  struct dma_chan                *tx_chan;
 +  struct dma_async_tx_descriptor *txd;
@@ -5007,10 +5058,10 @@ index 0000000..d3676fd
 +#endif /* OPENWIFI_SDR */
 diff --git a/drivers/sdr_mac_ops.c b/drivers/sdr_mac_ops.c
 new file mode 100644
-index 0000000..2479244
+index 0000000..a08ad01
 --- /dev/null
 +++ b/drivers/sdr_mac_ops.c
-@@ -0,0 +1,868 @@
+@@ -0,0 +1,863 @@
 +/**
 + * @file sdr_mac_ops.c
 + * @brief mac80211 operation callbacks for the OpenWiFi SDR driver.
@@ -5042,8 +5093,6 @@ index 0000000..2479244
 +                                              FIF_CONTROL | \
 +                                              FIF_OTHER_BSS | \
 +                                              FIF_PSPOLL)
-+#define OW_AMPDU_BUF_SIZE_MAX                63U
-+#define OW_AMPDU_STATUS_SAFE_BUF_SIZE_MAX    OW_TX_DONE_BUDGET
 +#define OW_TSF_STABLE_READ_MAX_RETRIES       8U
 +
 +/**
@@ -5716,8 +5765,9 @@ index 0000000..2479244
 + * - fuller AP multi-peer RX BA remains future work
 + * - hardware now receives the negotiated BA SSN together with sender address
 + *   and TID for the one active RX BA window
-+ * - TX operational buf_size is clamped to the maintained deferred-status budget
-+ *   (`OW_TX_DONE_BUDGET`, currently 56) and the hardware field width
++ * - TX operational buf_size is clamped to the hardware field width
++ *   (`OW_TX_AMPDU_BUF_SIZE_MAX`, currently 63), not the software completion-buffer
++ *   capacity
 + * - mac80211 software reorder remains enabled
 + */
 +static int openwifi_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_ampdu_params *params)
@@ -5767,14 +5817,10 @@ index 0000000..2479244
 +    /* NOTE(openwifi-tx-ampdu-global-reg): TX_INTF_REG_AMPDU_ACTION_CONFIG is
 +     * still one shared hardware register, not per peer/TID state. A later
 +     * IEEE80211_AMPDU_TX_OPERATIONAL callback can therefore overwrite
-+     * buf_size/density/max_tx_bytes for earlier peers or TIDs. Keep this
-+     * acceptable limitation explicit until TX aggregation parameters grow a
-+     * fuller per-flow hardware contract. Software also clamps buf_size to the
-+     * maintained deferred-status budget (`OW_TX_DONE_BUDGET`, currently 56)
-+     * so one aggregate completion IRQ never needs to surface more owner-state
-+     * than the current driver bookkeeping can represent safely. */
-+    buf_size = clamp_t(u16, params->buf_size, 1U,
-+      min_t(u16, OW_AMPDU_BUF_SIZE_MAX, OW_AMPDU_STATUS_SAFE_BUF_SIZE_MAX));
++     * buf_size/density/max_tx_bytes for earlier peers or TIDs. AP multi-STA TX
++     * AMPDU can mis-apply the most recently programmed peer parameters until
++     * the hardware grows a fuller per-flow contract. */
++    buf_size = clamp_t(u16, params->buf_size, 1U, OW_TX_AMPDU_BUF_SIZE_MAX);
 +    max_tx_bytes = (u16)(BIT(IEEE80211_HT_MAX_AMPDU_FACTOR + sta->ht_cap.ampdu_factor) - 1U);
 +    ampdu_action_config = (sta->ht_cap.ampdu_density << OW_AMPDU_ACTION_CONFIG_DENSITY_SHIFT) |
 +      (buf_size << OW_AMPDU_ACTION_CONFIG_BUF_SIZE_SHIFT) |
@@ -5881,10 +5927,10 @@ index 0000000..2479244
 +};
 diff --git a/drivers/sdr_rx.c b/drivers/sdr_rx.c
 new file mode 100644
-index 0000000..36f81da
+index 0000000..9598e34
 --- /dev/null
 +++ b/drivers/sdr_rx.c
-@@ -0,0 +1,1428 @@
+@@ -0,0 +1,1430 @@
 +/**
 + * @file sdr_rx.c
 + * @brief RX DMA setup, watchdog, and RX interrupt handling helpers.
@@ -5945,11 +5991,13 @@ index 0000000..36f81da
 + *      c. HPDCache/wt_dcache: implement CMO_INVAL handler — invalidate the
 + *         cache line matching the address operand (rs1).  For write-through
 + *         L1, invalidate = clear valid bit (no writeback needed).
-+ *      d. CSR: set cbo_block_size to L1 line size.  CVA6 wt_dcache has
-+ *         DcacheLineWidth=128 bits = 16 bytes (cheshire_pkg.sv:797).
-+ *         With 16B lines, 4096B slot = 256 cbo.inval instructions.
-+ *         HPDCache uses 64B lines — if HPDCache is adopted, 64 cbo.inval.
-+ *         Expose via riscv_cbom_block_size in DT or CSR enumerator.
++ *      d. CSR: set cbo_block_size to L1 line size.  Current Cheshire/CVA6
++ *         uses DcacheLineWidth=128 bits = 16 bytes (cheshire_pkg.sv:804);
++ *         the vendored HPDCache subsystem also derives 16B lines from that
++ *         parameter (cva6_hpdcache_subsystem.sv:202) unless DcacheLineWidth
++ *         is changed.  With 16B lines, 4096B slot = 256 cbo.inval
++ *         instructions.  Expose via riscv_cbom_block_size in DT or CSR
++ *         enumerator.
 + *
 + *   2. Kernel (6.0+ or backport to 5.15):
 + *      a. CONFIG_RISCV_ISA_ZICBOM=y — enables arch/riscv/mm/dma-noncoherent.c
@@ -5969,17 +6017,17 @@ index 0000000..36f81da
 + *      b. Phase RX-B: before reading slot metadata, call
 + *         dma_sync_single_for_cpu(dev, slot_dma_addr, RX_BD_BUF_SIZE,
 + *         DMA_FROM_DEVICE) — this issues cbo.inval for each cache line in the
-+ *         slot.  With wt_dcache 16B lines: 4096/16 = 256 cbo.inval per slot.
-+ *         With HPDCache 64B lines: 4096/64 = 64 cbo.inval per slot.
++ *         slot.  With the current 16B line size: 4096/16 = 256 cbo.inval
++ *         per slot for either wt_dcache or HPDCache.
 + *      c. Phase RX-C: after clearing pkt-exist flag, no sync needed — flag
 + *         clear is a write (cbo.clean or writeback handled by write-through).
 + *      d. dma_rmb() remains after sync (ordering, not coherency).
 + *      e. Benchmark (wt_dcache 16B lines): 256 × cbo.inval (~1-5 cycles each,
 + *         ~256-1280 cycles total) vs current NC-through-LLC penalty (~470-1880
 + *         cycles for full 1500B memcpy at LLC latency).  Net gain with 16B
-+ *         lines is marginal (~1-2x).  HPDCache with 64B lines (64 × cbo.inval
-+ *         = ~64-320 cycles) gives a clearer win (~3-7x).  Zicbom is most
-+ *         valuable when paired with HPDCache adoption.
++ *         lines is marginal (~1-2x).  A clearer Zicbom win requires changing
++ *         DcacheLineWidth to 512 bits / 64B lines; switching to HPDCache alone
++ *         does not provide that with the current Cheshire configuration.
 + *
 + *   Risk: CVA6 HPDCache CMO stubs may need non-trivial wiring.  Validate with
 + *   a standalone Zicbom test (cbo.inval loop + DMA write + read-back) before
@@ -7315,10 +7363,10 @@ index 0000000..36f81da
 +}
 diff --git a/drivers/sdr_tx.c b/drivers/sdr_tx.c
 new file mode 100644
-index 0000000..b4f7a86
+index 0000000..00d8916
 --- /dev/null
 +++ b/drivers/sdr_tx.c
-@@ -0,0 +1,2152 @@
+@@ -0,0 +1,2229 @@
 +/**
 + * @file sdr_tx.c
 + * @brief TX DMA recovery, TX completion IRQ, and TX submission helpers.
@@ -7771,15 +7819,17 @@ index 0000000..b4f7a86
 +}
 +
 +/**
-+ * @brief One reclaimed TX descriptor snapshot (copied before ring clear).
++ * @brief Snapshot descriptor-owned resources before clearing ring ownership.
 + */
-+struct ow_tx_reclaim_entry {
-+  struct sk_buff *skb_linked;
-+  dma_addr_t dma_mapping_addr;
-+  u32 dma_len_bytes;
-+  void *bounce_buf;
-+  u16 len_mpdu;
-+};
++static inline void ow_tx_reclaim_entry_from_bd(struct ow_tx_reclaim_entry *entry,
++                                               const struct openwifi_buffer_descriptor *bd)
++{
++  entry->skb_linked = bd->skb_linked;
++  entry->dma_mapping_addr = bd->dma_mapping_addr;
++  entry->dma_len_bytes = bd->dma_len_bytes;
++  entry->bounce_buf = bd->bounce_buf;
++  entry->len_mpdu = bd->len_mpdu;
++}
 +
 +/**
 + * @brief Check whether a TX descriptor still owns SW/DMA resources.
@@ -7805,6 +7855,65 @@ index 0000000..b4f7a86
 +  bd->dma_len_bytes = 0;
 +  bd->actual_tx_rate.idx = -1;
 +  bd->bounce_buf = NULL;
++}
++
++/**
++ * @brief Find the first empty TX BD after the current write index.
++ *
++ * @return Offset from bd_wr_idx, or 0 when no later slot is empty.
++ */
++static inline unsigned int ow_tx_ring_first_empty_offset(const struct openwifi_ring *ring)
++{
++  unsigned int offset;
++
++  for (offset = 1; offset < NUM_TX_BD; offset++) {
++    if (ring->bds[(ring->bd_wr_idx + offset) & (NUM_TX_BD - 1)].seq_no == OPENWIFI_TX_SEQ_INVALID) {
++      return offset;
++    }
++  }
++  return 0;
++}
++
++/**
++ * @brief Drop one TX completion when the topology-sized defer buffer overflows.
++ *
++ * This is an impossible-state guard: OW_TX_DONE_CAPACITY covers every possible
++ * in-flight TX BD. If the invariant is broken, clean descriptor-owned resources
++ * and still report final status so mac80211 queue/rate accounting observes the
++ * drop. WARN_ONCE keeps the first violation visible.
++ */
++static void ow_tx_drop_overflow_bd_locked(struct openwifi_priv *priv,
++                                          struct openwifi_buffer_descriptor *bd,
++                                          u32 queue_idx,
++                                          u32 bd_idx,
++                                          u32 pkt_cnt,
++                                          u32 last_bd_idx)
++{
++  WARN_ONCE(true,
++    "openwifi: TX completion capacity overflow q%u bd%u pkt_cnt%u last_bd%u\n",
++    queue_idx, bd_idx, pkt_cnt, last_bd_idx);
++
++  if (bd->dma_mapping_addr != 0
++      && priv->tx_chan != NULL
++      && priv->tx_chan->device != NULL
++      && priv->tx_chan->device->dev != NULL) {
++    if (bd->dma_len_bytes != 0U) {
++      dma_unmap_single(priv->tx_chan->device->dev, bd->dma_mapping_addr,
++        bd->dma_len_bytes, DMA_MEM_TO_DEV);
++    } else {
++      pr_warn_ratelimited("openwifi: skip tx overflow unmap with zero dma_len_bytes\n");
++    }
++  }
++
++  kfree(bd->bounce_buf);
++  if (bd->skb_linked != NULL) {
++    struct ieee80211_tx_info *info = IEEE80211_SKB_CB(bd->skb_linked);
++
++    info->flags &= ~(IEEE80211_TX_STAT_ACK | IEEE80211_TX_STAT_NOACK_TRANSMITTED);
++    info->status.rates[0].count = 0;
++    ieee80211_tx_status_irqsafe(priv->hw, bd->skb_linked);
++  }
++  ow_tx_bd_clear(bd);
 +}
 +
 +/**
@@ -7885,11 +7994,7 @@ index 0000000..b4f7a86
 +        reclaim_overflow = true;
 +        continue;
 +      }
-+      entry_arr[reclaim_idx].skb_linked = bd->skb_linked;
-+      entry_arr[reclaim_idx].dma_mapping_addr = bd->dma_mapping_addr;
-+      entry_arr[reclaim_idx].dma_len_bytes = bd->dma_len_bytes;
-+      entry_arr[reclaim_idx].bounce_buf = bd->bounce_buf;
-+      entry_arr[reclaim_idx].len_mpdu = bd->len_mpdu;
++      ow_tx_reclaim_entry_from_bd(&entry_arr[reclaim_idx], bd);
 +      reclaim_idx++;
 +      ow_tx_bd_clear(bd);
 +    }
@@ -7949,11 +8054,7 @@ index 0000000..b4f7a86
 +        if (!ow_tx_bd_is_active(bd)) {
 +          continue;
 +        }
-+        entry.skb_linked = bd->skb_linked;
-+        entry.dma_mapping_addr = bd->dma_mapping_addr;
-+        entry.dma_len_bytes = bd->dma_len_bytes;
-+        entry.bounce_buf = bd->bounce_buf;
-+        entry.len_mpdu = bd->len_mpdu;
++        ow_tx_reclaim_entry_from_bd(&entry, bd);
 +        ow_tx_bd_clear(bd);
 +        found_entry = true;
 +        break;
@@ -8222,7 +8323,9 @@ index 0000000..b4f7a86
 + *
 + * Phase TX-B (unlocked): dma_unmap_single, kfree(bounce_buf), and
 + * ieee80211_tx_status_irqsafe for each completed packet.  These are the
-+ * expensive operations that previously held priv->lock.
++ * expensive operations that previously held priv->lock. The defer buffer is
++ * per-device and topology-sized; this does not shorten the Phase TX-A lock
++ * hold time.
 + *
 + * @param irq Linux IRQ number.
 + * @param dev_id ieee80211_hw pointer.
@@ -8245,8 +8348,11 @@ index 0000000..b4f7a86
 +  bool tx_fail = false, fpga_queue_has_room = false;
 +  bool use_ht_aggr, pkt_need_ack, use_ht_rate, report_ampdu_status, tx_ack_received, tx_blockack_received;
 +  int idx_hw_queue;
-+  /* Phase TX-B deferred work lists. */
-+  struct ow_tx_done_entry tx_done[OW_TX_DONE_BUDGET];
++  u32 done_idx; /* u32: OW_TX_DONE_CAPACITY can exceed the u8 range. */
++  /* Phase TX-B deferred work list. IRQ handlers for one line are serialized by
++   * the kernel, so a per-device buffer avoids IRQ-stack pressure without adding
++   * a dynamic allocation path. */
++  struct ow_tx_done_entry *tx_done = priv->tx_done_entries;
 +  u32 n_done = 0;
 +  /* Deferred queue wake masks — populated under lock, applied after unlock.
 +   * NOTE: keeps ieee80211_wake_queue() outside priv->lock to reduce lock
@@ -8366,7 +8472,7 @@ index 0000000..b4f7a86
 +        skb = ring->bds[ring->bd_rd_idx].skb_linked;
 +
 +        /* Snapshot DMA info for Phase TX-B (unlocked unmap/free/status). */
-+        if (n_done < OW_TX_DONE_BUDGET) {
++        if (n_done < OW_TX_DONE_CAPACITY) {
 +          tx_done[n_done].skb        = skb;
 +          tx_done[n_done].dma_addr   = ring->bds[ring->bd_rd_idx].dma_mapping_addr;
 +          tx_done[n_done].dma_len_bytes = ring->bds[ring->bd_rd_idx].dma_len_bytes;
@@ -8484,35 +8590,15 @@ index 0000000..b4f7a86
 +        }
 +
 +        /* Defer ieee80211_tx_status_irqsafe to Phase TX-B (unlocked). */
-+        if (n_done < OW_TX_DONE_BUDGET) {
++        if (n_done < OW_TX_DONE_CAPACITY) {
 +          n_done++;
 +        } else {
-+          /* Budget exceeded — fall back to inline completion under lock.
-+           * The budget is sized so one full aggregate completion fits in the
-+           * deferred array under the maintained one-aggregate-at-a-time TX
-+           * path. On Zynq SMP, calling ieee80211_tx_status_irqsafe under
-+           * priv->lock is still a latent lock-ordering concern if mac80211 ever
-+           * calls back into the driver while processing the status queue.
-+           * TODO(openwifi-tx-budget-overflow-smp): if this path ever fires on
-+           * SMP, expand tx_done[] to a resizable list or chunk-drain. */
-+          if (ring->bds[ring->bd_rd_idx].dma_mapping_addr != 0
-+              && ring->bds[ring->bd_rd_idx].dma_len_bytes != 0) {
-+            dma_unmap_single(priv->tx_chan->device->dev,
-+              ring->bds[ring->bd_rd_idx].dma_mapping_addr,
-+              ring->bds[ring->bd_rd_idx].dma_len_bytes, DMA_MEM_TO_DEV);
-+          }
-+          kfree(ring->bds[ring->bd_rd_idx].bounce_buf);
-+          ieee80211_tx_status_irqsafe(dev, skb);
++          ow_tx_drop_overflow_bd_locked(priv, &ring->bds[ring->bd_rd_idx],
++            queue_idx, ring->bd_rd_idx, pkt_cnt, last_bd_rd_idx);
++          continue;
 +        }
 +
-+        ring->bds[ring->bd_rd_idx].prio = OPENWIFI_TX_PRIO_INVALID;
-+        ring->bds[ring->bd_rd_idx].len_mpdu = 0; /* invalid marker */
-+        ring->bds[ring->bd_rd_idx].seq_no = OPENWIFI_TX_SEQ_INVALID;
-+        ring->bds[ring->bd_rd_idx].skb_linked = NULL;
-+        ring->bds[ring->bd_rd_idx].actual_tx_rate.idx = -1;
-+        ring->bds[ring->bd_rd_idx].bounce_buf = NULL;
-+        ring->bds[ring->bd_rd_idx].dma_mapping_addr = 0;
-+        ring->bds[ring->bd_rd_idx].dma_len_bytes = 0;
++        ow_tx_bd_clear(&ring->bds[ring->bd_rd_idx]);
 +      }
 +
 +    loop_count++;
@@ -8534,11 +8620,15 @@ index 0000000..b4f7a86
 +    }
 +  }
 +
-+  for (i = 0; i < n_done; i++) {
-+    dma_unmap_single(priv->tx_chan->device->dev,
-+      tx_done[i].dma_addr, tx_done[i].dma_len_bytes, DMA_MEM_TO_DEV);
-+    kfree(tx_done[i].bounce_buf);
-+    ieee80211_tx_status_irqsafe(dev, tx_done[i].skb);
++  for (done_idx = 0; done_idx < n_done; done_idx++) {
++    if (tx_done[done_idx].dma_len_bytes != 0U) {
++      dma_unmap_single(priv->tx_chan->device->dev,
++        tx_done[done_idx].dma_addr, tx_done[done_idx].dma_len_bytes, DMA_MEM_TO_DEV);
++    } else {
++      pr_warn_ratelimited("openwifi: skip tx completion unmap with zero dma_len_bytes\n");
++    }
++    kfree(tx_done[done_idx].bounce_buf);
++    ieee80211_tx_status_irqsafe(dev, tx_done[done_idx].skb);
 +  }
 +
 +  return IRQ_HANDLED;
@@ -8732,6 +8822,7 @@ index 0000000..b4f7a86
 +  u16 rate_signal_value, len_mpdu = 0, len_psdu, num_dma_symbol, len_mpdu_delim_pad = 0, num_byte_pad;
 +  u16 mpdu_delim_header;
 +  u32 num_dma_byte, addr1_low32, addr2_low32 = 0, addr3_low32 = 0, tx_config, cts_reg = 0, phy_hdr_config;
++  u32 bd_idx;
 +  u16 addr1_high16, addr2_high16 = 0, addr3_high16 = 0, sc, seq_no = 0, cts_duration = 0, sifs;
 +  u8 cts_rate_hw_value = 0, cts_rate_signal_value = 0, rate_hw_value, pkt_need_ack, retry_limit_raw, use_short_gi, *dma_buf, retry_limit_hw_value, qos_hdr, qos_tid, prio, queue_idx, drv_ring_idx;
 +  u16 rc_flags; /* u16 not u8: ieee80211_tx_rate.flags is 11 bits */
@@ -8745,6 +8836,9 @@ index 0000000..b4f7a86
 +  void *bounce_buf = NULL; /* aligned DMA bounce buffer when source is unaligned */
 +  bool tx_submit_locked = false;
 +  struct ow_tx_aggr_key aggr_key;
++  struct ow_tx_reclaim_entry *fake_stop_reclaim = NULL;
++  unsigned int fake_stop_reclaim_count = 0;
++  u8 fake_stop_wake_mask = 0;
 +
 +  len_mpdu = skb->len;
 +
@@ -8805,21 +8899,24 @@ index 0000000..b4f7a86
 +  }
 +
 +  ring = &(priv->tx_ring[drv_ring_idx]);
++  fake_stop_reclaim = ring->fake_stop_reclaim;
 +
 +  /* Worker is mid-terminate -- bail before touching ring or lock. */
 +  if (READ_ONCE(priv->tx_dma_terminating)) {
 +    goto openwifi_tx_early_out;
 +  }
++
++  /* Serialize the ring-owned fake-stop scratch until unlocked finalization is
++   * complete. The regular submit path releases this lock before packet parsing
++   * and reacquires it only for DMA submission below. */
++  spin_lock(&priv->tx_submit_lock);
++  tx_submit_locked = true;
++
 +  spin_lock_irqsave(&priv->lock, flags);
 +  if (ring->bds[ring->bd_wr_idx].seq_no != OPENWIFI_TX_SEQ_INVALID) { /* not cleared yet by TX interrupt */
-+    for (i = 1; i < NUM_TX_BD; i++) {
-+      if (ring->bds[(ring->bd_wr_idx + i) & (NUM_TX_BD - 1)].seq_no == OPENWIFI_TX_SEQ_INVALID) {
-+        empty_bd_idx = i;
-+        break;
-+      }
-+    }
++    empty_bd_idx = ow_tx_ring_first_empty_offset(ring);
 +    hw_queue_len = tx_intf_api->TX_INTF_REG_QUEUE_FIFO_DATA_COUNT_read();
-+    if (empty_bd_idx) { /* clear stale BDs before first empty slot and report drop to mac80211 */
++    if (empty_bd_idx != 0U) { /* detach stale BDs before first empty slot */
 +      if (priv->stat.stat_enable) {
 +        priv->stat.tx_prio_stop0_fake_num[prio]++;
 +        priv->stat.tx_queue_stop0_fake_num[drv_ring_idx]++;
@@ -8828,26 +8925,13 @@ index 0000000..b4f7a86
 +        j = ((ring->bd_wr_idx + i) & (NUM_TX_BD - 1));
 +        printk_ratelimited("%s openwifi_tx: WARNING fake stop queue empty_bd_idx%d i%d lnx prio%d map to q%d stop%d hwq len%d wr%d rd%d bd prio%d len_mpdu%d seq_no%d skb_linked%p dma_mapping_addr=%pad\n", sdr_compatible_str,
 +        empty_bd_idx, i, prio, drv_ring_idx, ring->stop_flag, hw_queue_len, ring->bd_wr_idx, ring->bd_rd_idx, ring->bds[j].prio, ring->bds[j].len_mpdu, ring->bds[j].seq_no, ring->bds[j].skb_linked, &ring->bds[j].dma_mapping_addr);
-+        /* Report skipped buffered packet as failed TX status. */
-+        skb_new = ring->bds[j].skb_linked;
-+        dma_unmap_single(priv->tx_chan->device->dev, ring->bds[j].dma_mapping_addr,
-+          ring->bds[j].dma_len_bytes, DMA_MEM_TO_DEV);
-+        /* Free optional aligned bounce buffer after DMA unmap. */
-+        kfree(ring->bds[j].bounce_buf);
-+        ring->bds[j].bounce_buf = NULL;
-+        report_pkt_loss_due_to_driver_drop(dev, skb_new, ring->bds[j].len_mpdu);
-+
-+        ring->bds[j].prio = OPENWIFI_TX_PRIO_INVALID;
-+        ring->bds[j].len_mpdu = 0; /* invalid marker */
-+        ring->bds[j].seq_no = OPENWIFI_TX_SEQ_INVALID;
-+        ring->bds[j].skb_linked = NULL;
-+        ring->bds[j].actual_tx_rate.idx = -1;
-+        ring->bds[j].dma_mapping_addr = 0;
-+        ring->bds[j].dma_len_bytes = 0;
-+
++        ow_tx_reclaim_entry_from_bd(&fake_stop_reclaim[fake_stop_reclaim_count],
++          &ring->bds[j]);
++        fake_stop_reclaim_count++;
++        ow_tx_bd_clear(&ring->bds[j]);
 +      }
 +      if (ring->stop_prio_mask != 0U) { /* TX interrupt may never arrive on stale path, wake proactively */
-+        ow_tx_ring_wake_all_stopped(dev, ring);
++        fake_stop_wake_mask = ow_tx_ring_clear_stopped(ring);
 +      }
 +    } else {
 +      j = ring->bd_wr_idx;
@@ -8870,6 +8954,15 @@ index 0000000..b4f7a86
 +    }
 +  }
 +  spin_unlock_irqrestore(&priv->lock, flags);
++
++  for (i = 0; i < fake_stop_reclaim_count; i++) {
++    ow_tx_finalize_reclaim_entry(priv, dev, &fake_stop_reclaim[i]);
++  }
++  if (fake_stop_wake_mask != 0U) {
++    ow_tx_wake_from_mask(dev, fake_stop_wake_mask);
++  }
++  tx_submit_locked = false;
++  spin_unlock(&priv->tx_submit_lock);
 +  /* End of Linux priority to driver ring mapping. */
 +
 +  /* Read optional address fields from header when length permits. */
@@ -9175,11 +9268,18 @@ index 0000000..b4f7a86
 +  if (use_cts_protect) {
 +    rate_signal_value = (use_ht_rate ? rate_hw_value : wifi_mcs_table_11b_force_up[rate_hw_value]);
 +    cts_rate_signal_value = wifi_mcs_table_11b_force_up[cts_rate_hw_value];
-+    cts_reg = (use_cts_protect << 31
-+      | cts_use_traffic_rate << 30 | cts_duration << 8 | cts_rate_signal_value << 4 | rate_signal_value);
++    cts_reg = (use_cts_protect << OW_TX_CTS_TOSELF_ENABLE_SHIFT
++      | cts_use_traffic_rate << OW_TX_CTS_TOSELF_USE_TRAFFIC_RATE_SHIFT
++      | cts_duration << OW_TX_CTS_TOSELF_DURATION_SHIFT
++      | cts_rate_signal_value << OW_TX_CTS_TOSELF_CTS_RATE_SHIFT
++      | rate_signal_value);
 +  }
-+  phy_hdr_config = (ht_aggr_start << 20 | rate_hw_value << 16 | use_ht_rate << 15 | use_short_gi << 14 | use_ht_aggr << 13 | len_psdu);
-+  tx_config = (prio << 26 | ring->bd_wr_idx << 20 | queue_idx << 18 | retry_limit_hw_value << 14 | pkt_need_ack << 13 | num_dma_symbol);
++  phy_hdr_config = (ht_aggr_start << OW_TX_PHY_HDR_AGGR_START_SHIFT
++    | rate_hw_value << OW_TX_PHY_HDR_RATE_SHIFT
++    | use_ht_rate << OW_TX_PHY_HDR_USE_HT_RATE_SHIFT
++    | use_short_gi << OW_TX_PHY_HDR_SHORT_GI_SHIFT
++    | use_ht_aggr << OW_TX_PHY_HDR_USE_HT_AGGR_SHIFT
++    | len_psdu);
 +
 +  /* We must be sure that tx_flags is written last because the HW
 +   * looks at it to check if the rest of data is valid or not
@@ -9325,6 +9425,31 @@ index 0000000..b4f7a86
 +    goto openwifi_tx_after_dma_mapping;
 +  }
 +
++  /* ring->bd_wr_idx may have changed after the early stale-BD cleanup because
++   * tx_submit_lock is deliberately dropped before packet preparation. The final
++   * commit path owns the authoritative slot check and uses a local snapshot for
++   * every register/BD write below. */
++  bd_idx = ring->bd_wr_idx;
++  if (ring->bds[bd_idx].seq_no != OPENWIFI_TX_SEQ_INVALID) {
++    printk_ratelimited("%s openwifi_tx: WARNING final slot busy prio%d queue%d wr%d rd%d bd prio%d len_mpdu%d seq_no%d skb_linked%p dma_mapping_addr=%pad\n", sdr_compatible_str,
++      prio, queue_idx, bd_idx, ring->bd_rd_idx, ring->bds[bd_idx].prio, ring->bds[bd_idx].len_mpdu, ring->bds[bd_idx].seq_no, ring->bds[bd_idx].skb_linked, &ring->bds[bd_idx].dma_mapping_addr);
++    if (!ow_tx_ring_stop_has_prio(ring, prio)) {
++      ieee80211_stop_queue(dev, prio);
++      ow_tx_ring_stop_set_prio(ring, prio);
++      if (priv->stat.stat_enable) {
++        priv->stat.tx_prio_stop0_real_num[prio]++;
++        priv->stat.tx_queue_stop0_real_num[drv_ring_idx]++;
++      }
++    }
++    goto openwifi_tx_after_dma_mapping;
++  }
++  tx_config = (prio << OW_TX_CONFIG_PRIO_SHIFT
++    | bd_idx << OW_TX_CONFIG_BD_IDX_SHIFT
++    | queue_idx << OW_TX_CONFIG_QUEUE_SHIFT
++    | retry_limit_hw_value << OW_TX_CONFIG_RETRY_LIMIT_SHIFT
++    | pkt_need_ack << OW_TX_CONFIG_NEED_ACK_SHIFT
++    | num_dma_symbol);
++
 +  /* Check whether FPGA DMA FIFO and target queue have enough room. */
 +  dma_fifo_no_room_flag = tx_intf_api->TX_INTF_REG_S_AXIS_FIFO_NO_ROOM_read();
 +  hw_queue_len = tx_intf_api->TX_INTF_REG_QUEUE_FIFO_DATA_COUNT_read();
@@ -9341,7 +9466,7 @@ index 0000000..b4f7a86
 +
 +      if (priv->drv_tx_reg_val[DRV_TX_REG_IDX_PRINT_CFG] & DMESG_LOG_NORMAL_QUEUE_STOP) {
 +        printk("%s openwifi_tx: WARNING ieee80211_stop_queue prio%d queue%d no room flag%x hwq len%08x request%d wr%d rd%d\n", sdr_compatible_str,
-+                prio, queue_idx, dma_fifo_no_room_flag, hw_queue_len, num_dma_symbol, ring->bd_wr_idx, ring->bd_rd_idx);
++                prio, queue_idx, dma_fifo_no_room_flag, hw_queue_len, num_dma_symbol, bd_idx, ring->bd_rd_idx);
 +      }
 +      /* NOTE: ieee80211_stop_queue under lock is intentional here.  This is
 +       * the queue-full path (rare — only when FPGA FIFO/queue runs out of room).
@@ -9388,7 +9513,7 @@ index 0000000..b4f7a86
 +  tx_intf_api->TX_INTF_REG_PHY_HDR_CONFIG_write(phy_hdr_config);
 +  priv->txd = priv->tx_chan->device->device_prep_slave_sg(priv->tx_chan, &(priv->tx_sg),1,DMA_MEM_TO_DEV, DMA_CTRL_ACK | DMA_PREP_INTERRUPT, NULL);
 +  if (!(priv->txd)) {
-+    printk_ratelimited("%s openwifi_tx: WARNING sn %d device_prep_slave_sg %p\n", sdr_compatible_str, ring->bd_wr_idx, (void*)(priv->txd));
++    printk_ratelimited("%s openwifi_tx: WARNING sn %d device_prep_slave_sg %p\n", sdr_compatible_str, bd_idx, (void*)(priv->txd));
 +    goto openwifi_tx_after_dma_mapping;
 +  }
 +
@@ -9396,19 +9521,19 @@ index 0000000..b4f7a86
 +
 +  if (dma_submit_error(READ_ONCE(priv->tx_cookie))) {
 +    printk_ratelimited("%s openwifi_tx: WARNING sn %d dma_submit_error(tx_cookie) %d\n", sdr_compatible_str,
-+           ring->bd_wr_idx, (u32)(READ_ONCE(priv->tx_cookie)));
++           bd_idx, (u32)(READ_ONCE(priv->tx_cookie)));
 +    WRITE_ONCE(priv->tx_cookie, 0);
 +    goto openwifi_tx_after_dma_mapping;
 +  }
 +
 +  /* TX submit succeeded; commit descriptor ownership to software ring state. */
-+  ring->bds[ring->bd_wr_idx].prio = prio;
-+  ring->bds[ring->bd_wr_idx].len_mpdu = len_mpdu;
-+  ring->bds[ring->bd_wr_idx].seq_no = seq_no;
-+  ring->bds[ring->bd_wr_idx].skb_linked = skb;
-+  ring->bds[ring->bd_wr_idx].dma_mapping_addr = dma_mapping_addr;
-+  ring->bds[ring->bd_wr_idx].dma_len_bytes = num_dma_byte;
-+  ring->bds[ring->bd_wr_idx].bounce_buf = bounce_buf;
++  ring->bds[bd_idx].prio = prio;
++  ring->bds[bd_idx].len_mpdu = len_mpdu;
++  ring->bds[bd_idx].seq_no = seq_no;
++  ring->bds[bd_idx].skb_linked = skb;
++  ring->bds[bd_idx].dma_mapping_addr = dma_mapping_addr;
++  ring->bds[bd_idx].dma_len_bytes = num_dma_byte;
++  ring->bds[bd_idx].bounce_buf = bounce_buf;
 +
 +  /* Build actual_tx_rate from the final rate after all driver overrides.
 +   * Start from original mac80211 flags (rc_flags), then patch only the
@@ -9431,10 +9556,10 @@ index 0000000..b4f7a86
 +    atr.idx = (s8)rate_hw_value;
 +    atr.count = 0; /* filled by openwifi_tx_interrupt as nof_retx + 1 */
 +    atr.flags = atr_flags;
-+    ring->bds[ring->bd_wr_idx].actual_tx_rate = atr;
++    ring->bds[bd_idx].actual_tx_rate = atr;
 +  }
 +
-+  ring->bd_wr_idx = ((ring->bd_wr_idx+1)&(NUM_TX_BD-1));
++  ring->bd_wr_idx = ((bd_idx + 1) & (NUM_TX_BD - 1));
 +
 +  dma_async_issue_pending(priv->tx_chan);
 +
@@ -10085,10 +10210,10 @@ index 0000000..e3f209e
 +}
 diff --git a/drivers/sdrctl_intf.c b/drivers/sdrctl_intf.c
 new file mode 100644
-index 0000000..b3e9e0b
+index 0000000..9c311f7
 --- /dev/null
 +++ b/drivers/sdrctl_intf.c
-@@ -0,0 +1,724 @@
+@@ -0,0 +1,727 @@
 +// Author: Xianjun Jiao, Michael Mehari, Wei Liu
 +// SPDX-FileCopyrightText: 2019 UGent
 +// SPDX-License-Identifier: AGPL-3.0-or-later
@@ -10502,7 +10627,7 @@ index 0000000..b3e9e0b
 +    // printk("%s set RSSI_TH to %d\n", sdr_compatible_str, tmp);
 +    // xpu_api->XPU_REG_LBT_TH_write(tmp);
 +    // return 0;
-+    printk("%s WARNING Please use command: sdrctl dev <devname> set reg drv_xpu 0 <reg_value>! (1~2047, 0 means AUTO)!\n", sdr_compatible_str);
++    printk("%s WARNING Please use command: sdrctl dev <devname> set reg drv_xpu 0 <dbm_magnitude>! (example: 62 for -62 dBm, 0 means AUTO)!\n", sdr_compatible_str);
 +    return -EOPNOTSUPP;
 +  case OPENWIFI_CMD_GET_RSSI_TH:
 +    skb = (struct sk_buff *)cfg80211_testmode_alloc_reply_skb(hw->wiphy, nla_total_size(sizeof(u32)));
@@ -10510,7 +10635,7 @@ index 0000000..b3e9e0b
 +      return -ENOMEM;
 +    }
 +    tmp_int = rssi_half_db_to_rssi_dbm(xpu_api->XPU_REG_LBT_TH_read(), priv->rssi_correction); //rssi_dbm
-+    tmp = (-tmp_int);
++    tmp = (tmp_int < 0) ? (u32)(-tmp_int) : (u32)tmp_int;
 +    if (nla_put_u32(skb, OPENWIFI_ATTR_RSSI_TH, tmp)) {
 +      goto nla_put_failure;
 +    }
@@ -10783,8 +10908,11 @@ index 0000000..b3e9e0b
 +          tmp = xpu_api->XPU_REG_LBT_TH_read();//rssi_half_db
 +          tmp_int = rssi_half_db_to_rssi_dbm(tmp, priv->rssi_correction); //rssi_dbm
 +          printk("%s FPGA LBT threshold %d(%ddBm). The last_auto_fpga_lbt_th %d(%ddBm). rssi corr %d (%d/%dMHz)\n", sdr_compatible_str, tmp, tmp_int, priv->last_auto_fpga_lbt_th, rssi_half_db_to_rssi_dbm(priv->last_auto_fpga_lbt_th, priv->rssi_correction), priv->rssi_correction, priv->actual_tx_lo, priv->actual_rx_lo);
++          /* Userspace LBT helpers use unsigned dBm magnitude, e.g. 62 for -62 dBm. */
++          tmp = (tmp_int < 0) ? (u32)(-tmp_int) : (u32)tmp_int;
++        } else {
++          tmp = priv->drv_xpu_reg_val[reg_addr_idx];
 +        }
-+        tmp = priv->drv_xpu_reg_val[reg_addr_idx];
 +      } else {
 +        printk("%s WARNING reg_addr_idx %d is out of range!\n", sdr_compatible_str, reg_addr_idx);
 +        err = -EOPNOTSUPP;
@@ -10815,10 +10943,10 @@ index 0000000..b3e9e0b
 +}
 diff --git a/drivers/side_ch/side_ch.c b/drivers/side_ch/side_ch.c
 new file mode 100644
-index 0000000..9615064
+index 0000000..faddb64
 --- /dev/null
 +++ b/drivers/side_ch/side_ch.c
-@@ -0,0 +1,718 @@
+@@ -0,0 +1,785 @@
 +/*
 + * openwifi side channel driver
 + * Author: Xianjun Jiao
@@ -10834,6 +10962,7 @@ index 0000000..9615064
 +#include <linux/io.h>
 +#include <linux/iopoll.h>
 +#include <linux/module.h>
++#include <linux/mutex.h>
 +#include <linux/of_address.h>
 +#include <linux/of_dma.h>
 +#include <linux/of_platform.h>
@@ -10863,6 +10992,9 @@ index 0000000..9615064
 +
 +struct dma_chan *chan_to_pl = NULL;
 +struct dma_chan *chan_to_ps = NULL;
++/* Serialize netlink callbacks against probe/remove resource lifetime. */
++static DEFINE_MUTEX(side_ch_state_lock);
++static bool side_ch_tearing_down = true;
 +u8 *side_info_buf = NULL;
 +dma_addr_t side_info_buf_dma_addr;
 +struct device *side_info_dma_dev;  /* stored for dma_free_coherent in remove */
@@ -11268,82 +11400,126 @@ index 0000000..9615064
 +#define REG_TYPE_INVALID     0
 +#define REG_TYPE_HARDWARE    1
 +#define REG_TYPE_SOFTWARE    2
++#define SIDE_CH_CMD_WORDS    4
++#define SIDE_CH_MAX_REG_IDX  31
 +
 +// #define NETLINK_USER 31
 +struct sock *nl_sk = NULL;
-+static void side_ch_nl_recv_msg(struct sk_buff *skb) {
-+	struct nlmsghdr *nlh;
-+	int pid;
-+	struct sk_buff *skb_out;
-+	int msg_size;
-+	int *msg=(int*)side_info_buf;
-+	int action_flag, reg_type, reg_idx;
-+	u32 reg_val, *cmd_buf;
-+	int res;
 +
-+	// printk(KERN_INFO "Entering: %s\n", __FUNCTION__);
++/**
++ * @brief Handle side-channel netlink commands from side_ch_ctl.
++ *
++ * The userspace client validates commands before sending, but the kernel still
++ * treats the netlink payload as untrusted: short messages, unsupported register
++ * types, and out-of-range MMIO register indices are rejected here.
++ *
++ * @param skb Netlink skb carrying four u32 command words
++ */
++static void side_ch_nl_recv_msg(struct sk_buff *skb)
++{
++  struct nlmsghdr *nlh;
++  struct sk_buff *skb_out;
++  int pid;
++  int msg_size = 4;
++  int reply_word = -1;
++  const void *reply_data = &reply_word;
++  u32 action_flag, reg_type, reg_idx;
++  u32 reg_val, *cmd_buf;
++  int res;
 +
-+	// msg_size=strlen(msg);
++  if (skb == NULL) {
++    printk("%s recv msg: NULL skb\n", side_ch_compatible_str);
++    return;
++  }
 +
-+	nlh=(struct nlmsghdr*)skb->data;
-+	cmd_buf = (u32*)nlmsg_data(nlh);
-+	// printk(KERN_INFO "Netlink received msg payload:%s\n",(char*)nlmsg_data(nlh));
-+	action_flag = cmd_buf[0];
-+    reg_type = cmd_buf[1];
-+    reg_idx = cmd_buf[2];
-+    reg_val = cmd_buf[3];
-+	// printk("%s recv msg: len %d action_flag %d reg_type %d reg_idx %d reg_val %u\n", side_ch_compatible_str, nlmsg_len(nlh), action_flag, reg_type, reg_idx, reg_val);
++  if (skb->len < sizeof(*nlh)) {
++    printk("%s recv msg: netlink skb too short %u\n",
++      side_ch_compatible_str, skb->len);
++    return;
++  }
 +
-+	pid = nlh->nlmsg_pid; /*pid of sending process */
++  nlh = nlmsg_hdr(skb);
++  if (!nlmsg_ok(nlh, skb->len)
++      || nlmsg_len(nlh) < (SIDE_CH_CMD_WORDS * sizeof(u32))) {
++    printk("%s recv msg: invalid netlink length %u\n",
++      side_ch_compatible_str, nlh->nlmsg_len);
++    return;
++  }
 +
-+	if (action_flag==ACTION_SIDE_INFO_GET) {
-+		res = get_side_info(num_eq_init, iq_len_init);
-+		// printk(KERN_INFO "%s recv msg: get_side_info(%d,%d) res %d\n", side_ch_compatible_str, num_eq_init, iq_len_init, res);
-+		if (res>0) {
-+			msg_size = res;
-+			// printk("%s recv msg: %d %d %d %d %d %d %d %d\n", side_ch_compatible_str, msg[0], msg[1], msg[2], msg[3], msg[4], msg[5], msg[6], msg[7]);
-+		} else {
-+			msg_size = 4;
-+			msg[0] = -2;
-+		}
-+	} else if (action_flag==ACTION_REG_READ) {
-+		msg_size = 4;
-+		// if (reg_idx<0 || reg_idx>31) {
-+		// 	msg[0] = -3;
-+		// 	printk("%s recv msg: invalid reg_idx\n", side_ch_compatible_str);
-+		// } else {
-+			msg[0] = reg_read(reg_idx*4);
-+		// }
-+	} else if (action_flag==ACTION_REG_WRITE) {
-+		msg_size = 4;
-+		// if (reg_idx<0 || reg_idx>31) {
-+		// 	msg[0] = -4;
-+		// 	printk("%s recv msg: invalid reg_idx\n", side_ch_compatible_str);
-+		// } else {
-+			msg[0] = 0;
-+			reg_write(reg_idx*4, reg_val);
-+		// }
-+	} else {
-+		msg_size = 4;
-+		msg[0] = -1;
-+		printk("%s recv msg: invalid action_flag\n", side_ch_compatible_str);
-+	}
++  cmd_buf = (u32*)nlmsg_data(nlh);
++  action_flag = cmd_buf[0];
++  reg_type = cmd_buf[1];
++  reg_idx = cmd_buf[2];
++  reg_val = cmd_buf[3];
++  pid = nlh->nlmsg_pid; /* pid of sending process */
 +
-+	skb_out = nlmsg_new(msg_size,0);
-+	if(!skb_out) {
-+		printk(KERN_ERR "Failed to allocate new skb\n");
-+		return;
-+	} 
-+	nlh=nlmsg_put(skb_out,0,0,NLMSG_DONE,msg_size,0);  
-+	NETLINK_CB(skb_out).dst_group = 0; /* not in mcast group */
++  mutex_lock(&side_ch_state_lock);
++  if (side_ch_tearing_down) {
++    mutex_unlock(&side_ch_state_lock);
++    return;
++  }
 +
-+	memcpy(nlmsg_data(nlh),msg,msg_size);
++  if (action_flag == ACTION_SIDE_INFO_GET) {
++    if (side_info_buf == NULL || chan_to_ps == NULL) {
++      reply_word = -2;
++    } else {
++      res = get_side_info(num_eq_init, iq_len_init);
++      if (res > 0) {
++        msg_size = res;
++        reply_data = side_info_buf;
++      } else {
++        reply_word = -2;
++      }
++    }
++  } else if (action_flag == ACTION_REG_READ) {
++    if (reg_type != REG_TYPE_HARDWARE && reg_type != REG_TYPE_SOFTWARE) {
++      reply_word = -5;
++      printk("%s recv msg: unsupported reg_type %u\n",
++        side_ch_compatible_str, reg_type);
++    } else if (reg_idx > SIDE_CH_MAX_REG_IDX) {
++      reply_word = -3;
++      printk("%s recv msg: invalid reg_idx %u\n",
++        side_ch_compatible_str, reg_idx);
++    } else {
++      /* The legacy side_ch_ctl syntax distinguishes hardware/software types,
++       * but this kernel driver exposes one side-channel MMIO register bank.
++       */
++      reply_word = reg_read(reg_idx * 4);
++    }
++  } else if (action_flag == ACTION_REG_WRITE) {
++    if (reg_type != REG_TYPE_HARDWARE && reg_type != REG_TYPE_SOFTWARE) {
++      reply_word = -6;
++      printk("%s recv msg: unsupported reg_type %u\n",
++        side_ch_compatible_str, reg_type);
++    } else if (reg_idx > SIDE_CH_MAX_REG_IDX) {
++      reply_word = -4;
++      printk("%s recv msg: invalid reg_idx %u\n",
++        side_ch_compatible_str, reg_idx);
++    } else {
++      /* See the ACTION_REG_READ path for the legacy reg_type mapping. */
++      reply_word = 0;
++      reg_write(reg_idx * 4, reg_val);
++    }
++  } else {
++    reply_word = -1;
++    printk("%s recv msg: invalid action_flag\n", side_ch_compatible_str);
++  }
 +
-+	res=nlmsg_unicast(nl_sk,skb_out,pid);
++  skb_out = nlmsg_new(msg_size, 0);
++  if (!skb_out) {
++    mutex_unlock(&side_ch_state_lock);
++    printk(KERN_ERR "Failed to allocate new skb\n");
++    return;
++  }
++  nlh = nlmsg_put(skb_out, 0, 0, NLMSG_DONE, msg_size, 0);
++  NETLINK_CB(skb_out).dst_group = 0; /* not in mcast group */
 +
-+	if(res<0) {
-+		printk(KERN_INFO "Error while sending bak to user\n");
-+	}
++  memcpy(nlmsg_data(nlh), reply_data, msg_size);
++  res = nlmsg_unicast(nl_sk, skb_out, pid);
++  mutex_unlock(&side_ch_state_lock);
++  if (res < 0) {
++    printk(KERN_INFO "Error while sending bak to user\n");
++  }
 +}
 +
 +static int dev_probe(struct platform_device *pdev) {
@@ -11382,14 +11558,6 @@ index 0000000..9615064
 +	printk("%s dev_probe: base_addr 0x%p\n", side_ch_compatible_str, base_addr);
 +
 +	printk("%s dev_probe: succeed!\n", side_ch_compatible_str);
-+
-+	// --------------initialize netlink--------------
-+	//nl_sk = netlink_kernel_create(&init_net, NETLINK_USER, &cfg);
-+	nl_sk = netlink_kernel_create(&init_net, NETLINK_USERSOCK, &cfg);
-+	if(!nl_sk) {
-+		printk(KERN_ALERT "%s dev_probe: Error creating socket.\n", side_ch_compatible_str);
-+		return -10;
-+	}
 +
 +	//-----------------initialize fpga----------------
 +	printk("%s dev_probe: num_eq_init %d iq_len_init %d\n",side_ch_compatible_str, num_eq_init, iq_len_init);
@@ -11439,7 +11607,7 @@ index 0000000..9615064
 +		err = chan_to_ps ? PTR_ERR(chan_to_ps) : -ENODEV;
 +		pr_err("%s dev_probe: No chan_to_ps ret %d\n", side_ch_compatible_str, err);
 +		chan_to_ps = NULL;
-+		goto free_nl_sk;
++		return err;
 +	}
 +
 +	printk("%s dev_probe: DMA channel setup successfully. chan_to_pl 0x%p chan_to_ps 0x%p\n",side_ch_compatible_str, chan_to_pl, chan_to_ps);
@@ -11453,6 +11621,20 @@ index 0000000..9615064
 +	if (err) {
 +		goto free_chan_to_ps;
 +	}
++
++	mutex_lock(&side_ch_state_lock);
++	side_ch_tearing_down = false;
++	mutex_unlock(&side_ch_state_lock);
++
++	// --------------initialize netlink--------------
++	//nl_sk = netlink_kernel_create(&init_net, NETLINK_USER, &cfg);
++	nl_sk = netlink_kernel_create(&init_net, NETLINK_USERSOCK, &cfg);
++	if(!nl_sk) {
++		printk(KERN_ALERT "%s dev_probe: Error creating socket.\n", side_ch_compatible_str);
++		err = -10;
++		goto free_side_info_buf;
++	}
++
 +	return 0;
 +
 +	// err = dma_loopback_test(7, 512);
@@ -11461,14 +11643,20 @@ index 0000000..9615064
 +	// else
 +	// 	dma_release_channel(chan_to_ps);
 +
++free_side_info_buf:
++	mutex_lock(&side_ch_state_lock);
++	side_ch_tearing_down = true;
++	mutex_unlock(&side_ch_state_lock);
++	if (side_info_buf != NULL) {
++		dma_free_coherent(side_info_dma_dev, max_side_info_buf_size,
++		                  side_info_buf, side_info_buf_dma_addr);
++		side_info_buf = NULL;
++	}
 +free_chan_to_ps:
 +	if (chan_to_ps && !IS_ERR(chan_to_ps)) {
 +		dma_release_channel(chan_to_ps);
 +	}
 +	chan_to_ps = NULL;
-+free_nl_sk:
-+	netlink_kernel_release(nl_sk);
-+	nl_sk = NULL;
 +	return err;
 +
 +// free_chan_to_pl:
@@ -11481,8 +11669,14 @@ index 0000000..9615064
 +{
 +	printk("\n");
 +
++	mutex_lock(&side_ch_state_lock);
++	side_ch_tearing_down = true;
++
 +	printk("%s dev_remove: release nl_sk\n", side_ch_compatible_str);
-+	netlink_kernel_release(nl_sk);
++	if (nl_sk != NULL) {
++		netlink_kernel_release(nl_sk);
++		nl_sk = NULL;
++	}
 +
 +	// pr_info("%s dev_remove: dropped chan_to_pl 0x%p\n", side_ch_compatible_str, chan_to_pl);
 +	// if (chan_to_pl != NULL) {
@@ -11519,6 +11713,7 @@ index 0000000..9615064
 +	
 +	printk("%s dev_remove: base_addr 0x%p\n", side_ch_compatible_str, base_addr);
 +	printk("%s dev_remove: succeed!\n", side_ch_compatible_str);
++	mutex_unlock(&side_ch_state_lock);
 +	return 0;
 +}
 +

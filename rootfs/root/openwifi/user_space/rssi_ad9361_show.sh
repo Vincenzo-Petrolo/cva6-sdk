@@ -24,6 +24,7 @@
 #==============================================================================
 
 set -euo pipefail
+# shellcheck source=./openwifi_common.sh
 . "$(dirname "$0")/openwifi_common.sh"
 home_dir=$(pwd)
 
@@ -35,7 +36,8 @@ else
   num_read=$1
   for ((i = 0; i < num_read; i++)); do
     rssi_str=$(cat in_voltage0_rssi)
-    echo "$rssi_str" | sed 's/ *dB//'
+    rssi_str="${rssi_str%dB}"
+    echo "${rssi_str%"${rssi_str##*[! ]}"}"
   done
 fi
 cd "$home_dir"

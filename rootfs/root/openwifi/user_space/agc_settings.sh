@@ -14,6 +14,7 @@
 #==============================================================================
 
 set -euo pipefail
+# shellcheck source=./openwifi_common.sh
 . "$(dirname "$0")/openwifi_common.sh"
 if [[ "$#" -ne 1 ]]; then
     echo "You must enter 1 to apply new settings or 0 to restore default settings" >&2
@@ -42,26 +43,26 @@ openwifi_cd_iio_device direct_reg_access
 
 set -x
 if [[ "$1" == "0" ]]; then
-  echo "$REG_AGC_LARGE_OVL_THRESH"      0x72 > direct_reg_access
-  echo "$REG_AGC_LARGE_OVL_EXCEED_CNT"  0x72 > direct_reg_access
-  echo "$REG_AGC_OUTER_THRESH_HIGH"     0x08 > direct_reg_access
-  echo "$REG_AGC_OUTER_THRESH_LOW"      0x0A > direct_reg_access
-  echo "$REG_AGC_GAIN_UPDATE_CTR"       0x40 > direct_reg_access
-  echo "$REG_AGC_SETTLED_LOW"           0x30 > direct_reg_access
-  echo "$REG_AGC_LARGE_LMT_OVL_CNT"    0x00 > direct_reg_access
-  echo "$REG_AGC_ATTACK_DELAY"          0x58 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_LARGE_OVL_THRESH" 0x72 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_LARGE_OVL_EXCEED_CNT" 0x72 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_OUTER_THRESH_HIGH" 0x08 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_OUTER_THRESH_LOW" 0x0A > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_GAIN_UPDATE_CTR" 0x40 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_SETTLED_LOW" 0x30 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_LARGE_LMT_OVL_CNT" 0x00 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_ATTACK_DELAY" 0x58 > direct_reg_access
   echo "Applied default AGC settings"
 elif [[ "$1" == "1" ]]; then
-  echo "$REG_AGC_LARGE_OVL_THRESH"      0x70 > direct_reg_access
-  echo "$REG_AGC_LARGE_OVL_EXCEED_CNT"  0x77 > direct_reg_access
-  echo "$REG_AGC_OUTER_THRESH_HIGH"     0x1C > direct_reg_access
-  echo "$REG_AGC_OUTER_THRESH_LOW"      0x0C > direct_reg_access
-  echo "$REG_AGC_GAIN_UPDATE_CTR"       0x48 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_LARGE_OVL_THRESH" 0x70 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_LARGE_OVL_EXCEED_CNT" 0x77 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_OUTER_THRESH_HIGH" 0x1C > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_OUTER_THRESH_LOW" 0x0C > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_GAIN_UPDATE_CTR" 0x48 > direct_reg_access
   # DO NOT change 0x48 to 0x4A! Otherwise: did not acknowledge authentication response
-  echo "$REG_AGC_SETTLED_LOW"           0xb0 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_SETTLED_LOW" 0xb0 > direct_reg_access
   # 0x30 is the original value for REG_AGC_SETTLED_LOW
-  echo "$REG_AGC_LARGE_LMT_OVL_CNT"    0x80 > direct_reg_access
-  echo "$REG_AGC_ATTACK_DELAY"          0x18 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_LARGE_LMT_OVL_CNT" 0x80 > direct_reg_access
+  printf '%s %s\n' "$REG_AGC_ATTACK_DELAY" 0x18 > direct_reg_access
   echo "Applied optimized AGC settings"
 else
   echo "ERROR: argument must be 0 (default) or 1 (optimized)" >&2
@@ -69,6 +70,6 @@ else
 fi
 
 # AGC activation sequence (https://github.ugent.be/xjiao/openwifi/issues/148)
-echo "$REG_AGC_CTRL" "$AGC_ACTIVATE_STEP1" > direct_reg_access
-echo "$REG_AGC_CTRL" "$AGC_ACTIVATE_STEP2" > direct_reg_access
+printf '%s %s\n' "$REG_AGC_CTRL" "$AGC_ACTIVATE_STEP1" > direct_reg_access
+printf '%s %s\n' "$REG_AGC_CTRL" "$AGC_ACTIVATE_STEP2" > direct_reg_access
 set +x
